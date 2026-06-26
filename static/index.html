@@ -4,9 +4,45 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Vectorless RAG</title>
+    <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-    <h1>Vectorless RAG</h1>
-    <p>Coming soon...</p>
+    <div class="container">
+        <div class="sidebar">
+            <h2>Documents</h2>
+            <div class="upload-area">
+                <div class="dropzone" id="dropzone">
+                    <p>Drop PDFs here or click to upload</p>
+                    <p class="hint">Supports batch upload (50+ PDFs)</p>
+                </div>
+                <input type="file" id="fileInput" multiple accept=".pdf" hidden>
+            </div>
+            <div class="file-list" id="fileList">
+                <div class="empty-docs">No documents uploaded yet</div>
+            </div>
+            <div class="stats" id="stats">Loading graph stats...</div>
+        </div>
+        <div class="main">
+            <div class="chat-header">
+                <h1>Vectorless RAG</h1>
+                <span class="badge">Knowledge Graph · No Vectors</span>
+            </div>
+            <div class="messages" id="messages">
+                <div class="message assistant">
+                    <div class="bubble">
+                        Upload PDFs on the left, then ask me anything about them.<br><br>
+                        I'll extract entities and relationships from your documents and answer questions using a knowledge graph — no vector embeddings needed.
+                    </div>
+                </div>
+            </div>
+            <div class="input-area">
+                <div class="input-row">
+                    <input type="text" id="chatInput" placeholder="Ask a question about your documents..." autocomplete="off">
+                    <button id="sendBtn">Ask</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script src="/static/app.js"></script>
 </body>
 </html>
