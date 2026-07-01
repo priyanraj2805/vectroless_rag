@@ -1,4 +1,5 @@
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from app.storage.database import Database
 from app.ingestion.pdf_parser import PDFParser
 from app.ingestion.chunker import TextChunker
@@ -7,11 +8,11 @@ from app.ingestion.graph_builder import GraphBuilder
 
 
 class IngestionPipeline:
-    def __init__(self, db: Database, groq_key: str, model: str = "llama3-8b-8192"):
+    def __init__(self, db: Database, groq_key: str = "", openrouter_key: str = ""):
         self.db = db
         self.parser = PDFParser()
         self.chunker = TextChunker()
-        self.extractor = EntityExtractor(api_key=groq_key, model=model)
+        self.extractor = EntityExtractor(groq_key=groq_key, openrouter_key=openrouter_key)
         self.graph_builder = GraphBuilder(db)
 
     def ingest(self, pdf_path: str) -> int:
@@ -28,6 +29,8 @@ class IngestionPipeline:
 
             chunks = self.chunker.chunk_from_pages(parsed["pages"], document_id=doc_id)
 
+            # Insert all chunks into DB first
+            chunk_ids = []
             for chunk in chunks:
                 chunk_id = self.db.insert_chunk(
                     document_id=doc_id,
@@ -35,20 +38,27 @@ class IngestionPipeline:
                     page_number=chunk.get("page_number"),
                     section_title=chunk.get("section_title", ""),
                 )
+                chunk_ids.append(chunk_id)
 
-                extraction = self.extractor.extract(chunk["content"], document_id=doc_id)
-                node_ids = self.graph_builder.build_graph(extraction, document_id=doc_id)
+            # Extract entities for all chunks in parallel (5 concurrent API calls)
+            extractions = [None] * len(chunks)
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                futures = {
+                    pool.submit(self.extractor.extract, chunk["content"], doc_id): i
+                    for i, chunk in enumerate(chunks)
+                }
+                for future in as_completed(futures):
+                    extractions[futures[future]] = future.result()
 
-                for node_id in node_ids:
-                    self.db.insert_edge(
-                        source_id=chunk_id,
-                        target_id=node_id,
-                        edge_type="mentions",
-                    )
+            # Build graph from all extractions sequentially
+            for extraction in extractions:
+                if extraction:
+                    self.graph_builder.build_graph(extraction, document_id=doc_id)
 
             self.db.update_document_status(doc_id, "ready")
             return doc_id
 
-        except Exception as e:
+        except Exception:
+            self.db.rollback()
             self.db.update_document_status(doc_id, "error")
-            raise e
+            raise

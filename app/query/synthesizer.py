@@ -1,53 +1,59 @@
-import groq
+from app.llm_client import FallbackLLMClient
 from typing import Dict, List
 
 
-SYNTHESIS_PROMPT = """Answer the user's question based on the following context from a knowledge graph.
+SYSTEM_PROMPT = """You are a helpful AI assistant that can both chat naturally and answer questions about uploaded documents.
 
-Context includes:
-- Relevant entities found in the graph
-- Text chunks from source documents
+Behavior rules:
+- If the user says hi, hello, or asks a general conversational question — respond warmly and naturally like a friendly assistant.
+- If the user asks about the uploaded documents — use ONLY the provided document context to answer, citing sources.
+- If the user asks about documents but the context is empty or irrelevant — say you couldn't find relevant information in the uploaded documents, and suggest they try rephrasing or uploading more PDFs.
+- Never make up information. Never say you have no context if the user is just greeting you."""
 
-Rules:
-- Answer based ONLY on the provided context
-- If the context doesn't contain enough information, say so
-- Cite source document names when possible
-- Be concise and factual
-
-Context:
+SYNTHESIS_PROMPT = """Document context from the knowledge graph:
 {context}
 
-Question:
-"""
+User question: {question}
+
+Answer:"""
+
+CONVERSATIONAL_PROMPT = """User message: {question}
+
+Respond naturally. If they seem to be asking about documents, let them know they can upload PDFs and ask questions about them."""
 
 
 class AnswerSynthesizer:
-    def __init__(self, api_key: str, model: str = "llama3-8b-8192"):
-        self.client = groq.Client(api_key=api_key)
-        self.model = model
+    def __init__(self, groq_key: str = "", openrouter_key: str = ""):
+        self.client = FallbackLLMClient(groq_api_key=groq_key, openrouter_api_key=openrouter_key)
 
-    def synthesize(self, question: str, context: Dict[str, List]) -> Dict:
+    def synthesize(self, question: str, context: Dict[str, List], has_documents: bool = True) -> Dict:
         context_str = self._format_context(context)
+        is_conversational = not has_documents or self._is_conversational(question)
+
+        if is_conversational:
+            prompt = CONVERSATIONAL_PROMPT.format(question=question)
+        else:
+            prompt = SYNTHESIS_PROMPT.format(context=context_str, question=question)
 
         try:
             response = self.client.chat.completions.create(
-                model=self.model,
                 messages=[
-                    {"role": "system", "content": "You are a helpful assistant that answers questions based on document knowledge graphs."},
-                    {"role": "user", "content": SYNTHESIS_PROMPT.format(context=context_str) + question},
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
                 ],
-                temperature=0.3,
+                temperature=0.4,
                 max_tokens=1000,
             )
 
             answer_text = response.choices[0].message.content.strip()
-            sources = self._extract_sources(context)
+            sources = [] if is_conversational else self._extract_sources(context)
 
             return {
                 "answer": answer_text,
                 "sources": sources,
                 "entity_count": len(context.get("nodes", [])),
                 "chunk_count": len(context.get("chunks", [])),
+                "conversational": is_conversational,
             }
 
         except Exception as e:
@@ -56,7 +62,19 @@ class AnswerSynthesizer:
                 "sources": [],
                 "entity_count": 0,
                 "chunk_count": 0,
+                "conversational": False,
             }
+
+    def _is_conversational(self, question: str) -> bool:
+        GREETINGS = {
+            'hi', 'hii', 'hiii', 'hello', 'hey', 'howdy', 'hiya', 'yo', 'sup',
+            'good morning', 'good afternoon', 'good evening', 'good night',
+            'how are you', 'how r u', 'whats up', "what's up",
+            'thanks', 'thank you', 'ty', 'thx', 'bye', 'goodbye', 'ok', 'okay',
+            'cool', 'nice', 'great', 'awesome', 'got it', 'sure', 'alright',
+        }
+        q = question.lower().strip().rstrip('!?.,')
+        return q in GREETINGS or len(q.split()) <= 2
 
     def _format_context(self, context: Dict[str, List]) -> str:
         parts = []
@@ -71,14 +89,14 @@ class AnswerSynthesizer:
 
         chunks = context.get("chunks", [])
         if chunks:
-            parts.append("\nRelevant text:")
+            parts.append("\nRelevant text from documents:")
             for chunk in chunks:
                 content = chunk[1] if len(chunk) > 1 else str(chunk)
                 page = chunk[2] if len(chunk) > 2 else "?"
                 section = chunk[3] if len(chunk) > 3 else ""
-                parts.append(f"- [Page {page}, {section}] {content[:500]}")
+                parts.append(f"[Page {page}{', ' + section if section else ''}]\n{content[:600]}")
 
-        return "\n".join(parts)
+        return "\n".join(parts) if parts else "No document context available."
 
     def _extract_sources(self, context: Dict[str, List]) -> List[Dict]:
         sources = []

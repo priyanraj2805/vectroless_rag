@@ -75,17 +75,36 @@ class Database:
     """
 
     def __init__(self, db_path: str):
-        self.conn = sqlite3.connect(db_path)
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(self.SCHEMA)
+        self._migrate()
         self.conn.commit()
 
+    def _migrate(self):
+        cols = {row[1] for row in self.conn.execute("PRAGMA table_info(documents)").fetchall()}
+        if "completed_at" not in cols:
+            self.conn.execute("ALTER TABLE documents ADD COLUMN completed_at TIMESTAMP")
+        # Rebuild FTS indexes to fix any sync issues from previous failed writes
+        try:
+            self.conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
+            self.conn.execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')")
+        except Exception:
+            pass
+
     def execute(self, query: str, params: tuple = ()) -> sqlite3.Cursor:
-        return self.conn.execute(query, params)
+        try:
+            return self.conn.execute(query, params)
+        except Exception:
+            self.conn.rollback()
+            raise
 
     def commit(self):
         self.conn.commit()
+
+    def rollback(self):
+        self.conn.rollback()
 
     def close(self):
         self.conn.close()
@@ -123,14 +142,22 @@ class Database:
         return cursor.lastrowid
 
     def update_document_status(self, doc_id: int, status: str):
-        self.execute("UPDATE documents SET status = ? WHERE id = ?", (status, doc_id))
+        if status in ("ready", "error"):
+            self.execute(
+                "UPDATE documents SET status = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (status, doc_id),
+            )
+        else:
+            self.execute("UPDATE documents SET status = ? WHERE id = ?", (status, doc_id))
         self.commit()
 
     def get_document(self, doc_id: int):
         return self.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
 
     def list_documents(self):
-        return self.execute("SELECT * FROM documents ORDER BY upload_date DESC").fetchall()
+        return self.execute(
+            "SELECT id, filename, page_count, upload_date, status, completed_at FROM documents ORDER BY upload_date DESC"
+        ).fetchall()
 
     def delete_document(self, doc_id: int):
         self.execute("DELETE FROM chunks WHERE document_id = ?", (doc_id,))

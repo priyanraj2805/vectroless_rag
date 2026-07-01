@@ -15,6 +15,8 @@ def test_chat_returns_answer():
         mock_settings.groq_api_key = "test_key"
         mock_settings.database_path = ":memory:"
 
+        MockDB.return_value.get_graph_stats.return_value = {"documents": 1, "chunks": 5, "nodes": 3, "edges": 2}
+
         MockPlanner.return_value.plan.return_value = {
             "search_terms": ["revenue"],
             "entity_types": ["metric"],
@@ -45,9 +47,7 @@ def test_chat_returns_answer():
 
 def test_graph_stats():
     with patch("app.api.chat.Database") as MockDB:
-        mock_db = MagicMock()
-        mock_db.get_graph_stats.return_value = {"nodes": 5, "edges": 3, "chunks": 10, "documents": 2}
-        MockDB.return_value = mock_db
+        MockDB.return_value.get_graph_stats.return_value = {"nodes": 5, "edges": 3, "chunks": 10, "documents": 2}
 
         response = client.get("/api/graph/stats")
         assert response.status_code == 200

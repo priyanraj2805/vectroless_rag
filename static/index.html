@@ -7,42 +7,63 @@
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+    <div id="toastContainer"></div>
+
     <div class="container">
         <div class="sidebar">
-            <h2>Documents</h2>
+            <div class="sidebar-header">
+                <h2>Documents</h2>
+                <div class="doc-summary" id="docSummary">Loading...</div>
+            </div>
+            <div class="pdf-stats" id="pdfStats">
+                <div class="pdf-stat-item">
+                    <span class="pdf-stat-number" id="totalPdfs">—</span>
+                    <span class="pdf-stat-label">Total PDFs</span>
+                </div>
+                <div class="pdf-stat-divider"></div>
+                <div class="pdf-stat-item">
+                    <span class="pdf-stat-number" id="totalTime">—</span>
+                    <span class="pdf-stat-label">Total Time</span>
+                </div>
+            </div>
             <div class="upload-area">
                 <div class="dropzone" id="dropzone">
+                    <div class="drop-icon">📄</div>
                     <p>Drop PDFs here or click to upload</p>
                     <p class="hint">Supports batch upload (50+ PDFs)</p>
                 </div>
                 <input type="file" id="fileInput" multiple accept=".pdf" hidden>
             </div>
             <div class="file-list" id="fileList">
-                <div class="empty-docs">No documents uploaded yet</div>
+                <div class="empty-docs">Upload PDFs to get started</div>
             </div>
             <div class="stats" id="stats">Loading graph stats...</div>
         </div>
+
         <div class="main">
             <div class="chat-header">
                 <h1>Vectorless RAG</h1>
-                <span class="badge">Knowledge Graph · No Vectors</span>
+                <span class="badge" id="headerBadge">No documents</span>
             </div>
+            <div class="chat-context" id="chatContext"></div>
             <div class="messages" id="messages">
                 <div class="message assistant">
                     <div class="bubble">
-                        Upload PDFs on the left, then ask me anything about them.<br><br>
-                        I'll extract entities and relationships from your documents and answer questions using a knowledge graph — no vector embeddings needed.
+                        Hi! I'm your document assistant.<br><br>
+                        Upload PDFs using the sidebar on the left — once they show <strong style="color:#2e7d32">✓ Ready</strong>, you can ask me anything about them.<br><br>
+                        I can also chat normally if you just want to say hello!
                     </div>
                 </div>
             </div>
             <div class="input-area">
                 <div class="input-row">
-                    <input type="text" id="chatInput" placeholder="Ask a question about your documents..." autocomplete="off">
-                    <button id="sendBtn">Ask</button>
+                    <input type="text" id="chatInput" placeholder="Ask a question or say hi..." autocomplete="off">
+                    <button id="sendBtn">Send</button>
                 </div>
             </div>
         </div>
     </div>
+
     <script src="/static/app.js"></script>
 </body>
 </html>

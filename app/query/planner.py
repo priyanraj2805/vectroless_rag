@@ -1,5 +1,5 @@
 import json
-import groq
+from app.llm_client import FallbackLLMClient
 from typing import Dict
 
 
@@ -25,14 +25,12 @@ Question:
 
 
 class QueryPlanner:
-    def __init__(self, api_key: str, model: str = "llama3-8b-8192"):
-        self.client = groq.Client(api_key=api_key)
-        self.model = model
+    def __init__(self, groq_key: str = "", openrouter_key: str = ""):
+        self.client = FallbackLLMClient(groq_api_key=groq_key, openrouter_api_key=openrouter_key)
 
     def plan(self, question: str) -> Dict:
         try:
             response = self.client.chat.completions.create(
-                model=self.model,
                 messages=[
                     {"role": "system", "content": "You are a search planning assistant. Return only valid JSON."},
                     {"role": "user", "content": PLANNER_PROMPT + question},

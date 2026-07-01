@@ -1,5 +1,6 @@
 import json
-import groq
+from app.llm_client import FallbackLLMClient
+import time
 from typing import Dict, List
 
 
@@ -26,39 +27,43 @@ Text:
 
 
 class EntityExtractor:
-    def __init__(self, api_key: str, model: str = "llama3-8b-8192"):
-        self.client = groq.Client(api_key=api_key)
-        self.model = model
+    def __init__(self, groq_key: str = "", openrouter_key: str = ""):
+        self.client = FallbackLLMClient(groq_api_key=groq_key, openrouter_api_key=openrouter_key)
 
     def extract(self, text: str, document_id: int) -> Dict[str, List]:
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are an entity extraction assistant. Return only valid JSON."},
-                    {"role": "user", "content": EXTRACTION_PROMPT + text[:6000]},
-                ],
-                temperature=0.1,
-                max_tokens=2000,
-            )
+        for attempt in range(3):
+            try:
+                response = self.client.chat.completions.create(
+                    messages=[
+                        {"role": "system", "content": "You are an entity extraction assistant. Return only valid JSON."},
+                        {"role": "user", "content": EXTRACTION_PROMPT + text[:6000]},
+                    ],
+                    temperature=0.1,
+                    max_tokens=800,
+                )
 
-            content = response.choices[0].message.content.strip()
-            if content.startswith("```"):
-                content = content.split("\n", 1)[1]
-                if content.endswith("```"):
-                    content = content[:-3]
+                content = response.choices[0].message.content.strip()
+                if content.startswith("```"):
+                    content = content.split("\n", 1)[1]
+                    if content.endswith("```"):
+                        content = content[:-3]
 
-            result = json.loads(content)
-            result.setdefault("entities", [])
-            result.setdefault("relationships", [])
+                result = json.loads(content)
+                result.setdefault("entities", [])
+                result.setdefault("relationships", [])
 
-            for entity in result["entities"]:
-                entity["document_id"] = document_id
+                for entity in result["entities"]:
+                    entity["document_id"] = document_id
 
-            return result
+                return result
 
-        except json.JSONDecodeError:
-            return {"entities": [], "relationships": []}
-        except Exception as e:
-            print(f"Extraction error: {e}")
-            return {"entities": [], "relationships": []}
+            except json.JSONDecodeError:
+                return {"entities": [], "relationships": []}
+            except Exception as e:
+                if "rate_limit" in str(e).lower() and attempt < 2:
+                    wait = 20 if attempt == 0 else 40
+                    print(f"Rate limit hit, waiting {wait}s...")
+                    time.sleep(wait)
+                else:
+                    print(f"Extraction error: {e}")
+                    return {"entities": [], "relationships": []}
