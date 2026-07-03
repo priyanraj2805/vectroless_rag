@@ -139,12 +139,13 @@ class Database:
         self.commit()
         return cursor.lastrowid
 
-    def insert_chunk(self, document_id: int, content: str, page_number: int = None, section_title: str = None) -> int:
+    def insert_chunk(self, document_id: int, content: str, page_number: int = None, section_title: str = None, auto_commit: bool = True) -> int:
         cursor = self.execute(
             "INSERT INTO chunks (document_id, content, page_number, section_title) VALUES (?, ?, ?, ?)",
             (document_id, content, page_number, section_title),
         )
-        self.commit()
+        if auto_commit:
+            self.commit()
         return cursor.lastrowid
 
     def update_document_status(self, doc_id: int, status: str):
@@ -184,12 +185,13 @@ class Database:
             (query, limit),
         ).fetchall()
 
-    def insert_embedding(self, chunk_id: int, vector: bytes):
+    def insert_embedding(self, chunk_id: int, vector: bytes, auto_commit: bool = True):
         self.execute(
             "INSERT OR REPLACE INTO embeddings (chunk_id, vector) VALUES (?, ?)",
             (chunk_id, vector),
         )
-        self.commit()
+        if auto_commit:
+            self.commit()
 
     def get_all_embeddings(self, document_ids: list = None):
         """Return [(chunk_id, vector_blob, content, page_number, section_title)]"""

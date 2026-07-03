@@ -1,14 +1,14 @@
 import os
 from fastapi import APIRouter, UploadFile, File, BackgroundTasks
 from typing import List
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from app.config import settings
 from app.storage.database import Database
 from app.ingestion.pipeline import IngestionPipeline
 from app.cache import get_redis, bump_version
 
 router = APIRouter(prefix="/api")
-executor = ProcessPoolExecutor(max_workers=1)
+executor = ThreadPoolExecutor(max_workers=2)
 
 
 def get_db():

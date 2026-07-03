@@ -22,6 +22,11 @@ class Embedder:
         vector = self.model.encode(text, normalize_embeddings=True)
         return vector.astype(np.float32).tobytes()
 
+    def embed_batch(self, texts: list) -> list:
+        """Encode all texts in a single forward pass — much faster than one-by-one."""
+        vectors = self.model.encode(texts, normalize_embeddings=True, batch_size=32, show_progress_bar=False)
+        return [v.astype(np.float32).tobytes() for v in vectors]
+
     def embed_query(self, text: str) -> np.ndarray:
         """Embed a query string and return as numpy array for cosine similarity."""
         return self.model.encode(text, normalize_embeddings=True).astype(np.float32)

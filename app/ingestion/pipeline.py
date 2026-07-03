@@ -31,7 +31,7 @@ class IngestionPipeline:
 
             chunks = self.chunker.chunk_from_pages(parsed["pages"], document_id=doc_id)
 
-            # Insert all chunks into DB and compute embeddings
+            # Step 1: Insert all chunks into DB in one transaction (no per-row commit)
             chunk_ids = []
             for chunk in chunks:
                 chunk_id = self.db.insert_chunk(
@@ -39,13 +39,21 @@ class IngestionPipeline:
                     content=chunk["content"],
                     page_number=chunk.get("page_number"),
                     section_title=chunk.get("section_title", ""),
+                    auto_commit=False,
                 )
                 chunk_ids.append(chunk_id)
-                # Compute and store embedding for this chunk
-                vector = self.embedder.embed(chunk["content"])
-                self.db.insert_embedding(chunk_id, vector)
+            self.db.commit()
 
-            # Extract entities for all chunks in parallel (5 concurrent API calls)
+            # Step 2: Batch-embed all chunks in a single model forward pass
+            texts = [chunk["content"] for chunk in chunks]
+            vectors = self.embedder.embed_batch(texts)
+
+            # Step 3: Insert all embeddings in one transaction
+            for chunk_id, vector in zip(chunk_ids, vectors):
+                self.db.insert_embedding(chunk_id, vector, auto_commit=False)
+            self.db.commit()
+
+            # Step 4: Extract entities in parallel (5 concurrent LLM calls)
             extractions = [None] * len(chunks)
             with ThreadPoolExecutor(max_workers=5) as pool:
                 futures = {
@@ -55,7 +63,7 @@ class IngestionPipeline:
                 for future in as_completed(futures):
                     extractions[futures[future]] = future.result()
 
-            # Build graph from all extractions sequentially
+            # Step 5: Build graph from extractions
             for extraction in extractions:
                 if extraction:
                     self.graph_builder.build_graph(extraction, document_id=doc_id)
