@@ -6,7 +6,7 @@ from app.storage.database import Database
 from app.query.planner import QueryPlanner
 from app.query.executor import QueryExecutor
 from app.query.synthesizer import AnswerSynthesizer
-from app.cache import get_redis, get_version, make_versioned_key, make_key, cache_get, cache_set
+from app.cache import get_redis, get_version, make_versioned_key, cache_get, cache_set
 
 router = APIRouter(prefix="/api")
 
@@ -42,8 +42,9 @@ async def chat(request: ChatRequest):
         # Get current version — changes whenever docs are added/deleted
         version = get_version(r)
         doc_key = str(sorted(effective_ids)) if effective_ids else "all"
+        num_docs = len(effective_ids) if effective_ids else 1
 
-        # Versioned answer key — stale if version changed
+        # Versioned answer key — includes doc selection so different doc combos get different caches
         answer_key = make_versioned_key("answer", version, request.question, doc_key)
         cached = cache_get(r, answer_key)
         if cached:
@@ -56,22 +57,27 @@ async def chat(request: ChatRequest):
         synthesizer = AnswerSynthesizer(groq_key=settings.groq_api_key, openrouter_key=settings.openrouter_api_key)
 
         if not has_documents or synthesizer._is_conversational(request.question):
-            context = {"nodes": [], "chunks": []}
+            context = {"nodes": [], "chunks": [], "doc_groups": {}}
             result = synthesizer.synthesize(request.question, context, has_documents=False)
         else:
             planner = QueryPlanner(groq_key=settings.groq_api_key, openrouter_key=settings.openrouter_api_key)
             executor = QueryExecutor(db)
 
-            # Versioned plan key — stale if version changed
-            plan_key = make_versioned_key("plan", version, request.question)
+            # Plan cache key includes doc_key so different doc selections get different plans
+            plan_key = make_versioned_key("plan", version, request.question, doc_key)
             plan = cache_get(r, plan_key)
             if plan:
                 print(f"[cache] Plan HIT v{version} — {request.question[:50]}")
             else:
-                plan = planner.plan(request.question)
+                # Pass num_docs so the planner scales max_results correctly
+                plan = planner.plan(request.question, num_docs=num_docs)
                 cache_set(r, plan_key, plan, ttl=3600)
 
             context = executor.execute(plan, document_ids=effective_ids)
+
+            # Build per-document groups for the synthesizer to present clear per-doc summaries
+            context["doc_groups"] = _build_doc_groups(db, context["chunks"], effective_ids)
+
             result = synthesizer.synthesize(request.question, context, has_documents=True)
 
         response = {
@@ -85,6 +91,50 @@ async def chat(request: ChatRequest):
         return response
     finally:
         db.close()
+
+
+def _build_doc_groups(db: Database, chunks: list, document_ids: Optional[List[int]]) -> dict:
+    """
+    Groups chunks by their source document. Returns:
+    { "Document 1 — filename.pdf": [chunk, chunk, ...], ... }
+    Used by the synthesizer to format multi-doc context with clear per-doc labels.
+    """
+    if not chunks or not document_ids:
+        return {}
+
+    # Fetch filename for each document_id
+    doc_names = {}
+    for doc_id in document_ids:
+        row = db.get_document(doc_id)
+        if row:
+            doc_names[doc_id] = row[1]  # filename column
+
+    # Look up document_id for each chunk_id
+    chunk_ids = [c[0] for c in chunks]
+    if not chunk_ids:
+        return {}
+
+    placeholders = ",".join("?" * len(chunk_ids))
+    rows = db.execute(
+        f"SELECT id, document_id FROM chunks WHERE id IN ({placeholders})",
+        tuple(chunk_ids),
+    ).fetchall()
+    chunk_to_doc = {row[0]: row[1] for row in rows}
+
+    # Group chunks by document
+    groups: dict = {}
+    for chunk in chunks:
+        chunk_id = chunk[0]
+        doc_id = chunk_to_doc.get(chunk_id)
+        if doc_id is None:
+            continue
+        filename = doc_names.get(doc_id, f"Document {doc_id}")
+        label = f"Document {doc_id} — {filename}"
+        if label not in groups:
+            groups[label] = []
+        groups[label].append(chunk)
+
+    return groups
 
 
 @router.get("/graph/stats")

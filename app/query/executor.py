@@ -32,16 +32,70 @@ class QueryExecutor:
 
         all_node_ids = list(set(node_ids + [r[0] for r in related_nodes]))
 
-        # Run FTS keyword search and semantic search, then merge
+        # Run FTS keyword search and semantic search, then merge with RRF
+        limit = plan.get("max_results", 10)
         fts_chunks = self._search_chunks_fts(plan, document_ids)
         semantic_chunks = self._search_chunks_semantic(plan, document_ids)
-        chunks = self._rrf_merge(fts_chunks, semantic_chunks, limit=plan.get("max_results", 10))
+        chunks = self._rrf_merge(fts_chunks, semantic_chunks, limit=limit)
+
+        # Guarantee every selected document contributes chunks (critical for multi-doc summaries)
+        if document_ids and len(document_ids) > 1:
+            min_per_doc = max(3, limit // len(document_ids))
+            chunks = self._ensure_per_doc_coverage(chunks, document_ids, min_per_doc=min_per_doc)
 
         return {
             "nodes": nodes + related_nodes,
             "chunks": chunks,
             "node_ids": all_node_ids,
         }
+
+    def _ensure_per_doc_coverage(self, chunks: List, document_ids: List[int], min_per_doc: int = 3) -> List:
+        """
+        Ensures each selected document has at least min_per_doc chunks in the result.
+        If a document is under-represented (e.g. crowded out by a dominant doc in BM25),
+        fetch its top chunks directly by rowid and append them.
+        """
+        # Count how many chunks each doc already has in the merged result
+        # We need to look up document_id for each chunk_id
+        chunk_ids = [c[0] for c in chunks]
+        doc_chunk_count: Dict[int, int] = {doc_id: 0 for doc_id in document_ids}
+
+        if chunk_ids:
+            placeholders = ",".join("?" * len(chunk_ids))
+            rows = self.db.execute(
+                f"SELECT id, document_id FROM chunks WHERE id IN ({placeholders})",
+                tuple(chunk_ids),
+            ).fetchall()
+            for row in rows:
+                chunk_id, doc_id = row
+                if doc_id in doc_chunk_count:
+                    doc_chunk_count[doc_id] = doc_chunk_count.get(doc_id, 0) + 1
+
+        existing_chunk_ids = set(chunk_ids)
+        extra_chunks = []
+
+        for doc_id in document_ids:
+            have = doc_chunk_count.get(doc_id, 0)
+            need = min_per_doc - have
+            if need <= 0:
+                continue
+
+            # Fetch the top chunks from this doc that aren't already in the result
+            rows = self.db.execute(
+                "SELECT id, content, page_number, section_title FROM chunks WHERE document_id = ? ORDER BY id LIMIT ?",
+                (doc_id, need + len(existing_chunk_ids)),  # over-fetch to account for dedup
+            ).fetchall()
+
+            added = 0
+            for row in rows:
+                if added >= need:
+                    break
+                if row[0] not in existing_chunk_ids:
+                    extra_chunks.append((row[0], row[1], row[2], row[3], 0))
+                    existing_chunk_ids.add(row[0])
+                    added += 1
+
+        return chunks + extra_chunks
 
     def _search_nodes(self, plan: Dict, document_ids: Optional[List[int]] = None) -> List:
         results = []
@@ -133,23 +187,19 @@ class QueryExecutor:
         if not search_terms:
             return []
 
-        # Embed the combined search query
         query_text = " ".join(search_terms)
         query_vec = self.embedder.embed_query(query_text)
 
-        # Load all stored embeddings (filtered by document if needed)
         rows = self.db.get_all_embeddings(document_ids)
         if not rows:
             return []
 
-        # Score each chunk by cosine similarity
         scored = []
         for chunk_id, vector_blob, content, page_number, section_title in rows:
             chunk_vec = self.embedder.from_bytes(vector_blob)
             score = self.embedder.cosine_similarity(query_vec, chunk_vec)
             scored.append((chunk_id, content, page_number, section_title, score))
 
-        # Return top-N sorted by similarity score descending
         scored.sort(key=lambda x: x[4], reverse=True)
         return scored[:limit]
 
@@ -157,7 +207,6 @@ class QueryExecutor:
         """
         Reciprocal Rank Fusion — merges two ranked lists into one.
         Score = 1/(k + rank_fts) + 1/(k + rank_semantic)
-        Higher score = chunk appeared high in both lists.
         """
         scores: Dict[int, float] = {}
         chunk_data: Dict[int, tuple] = {}

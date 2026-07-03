@@ -7,6 +7,7 @@ SYSTEM_PROMPT = """You are a helpful AI assistant that can both chat naturally a
 Behavior rules:
 - If the user says hi, hello, or asks a general conversational question — respond warmly and naturally like a friendly assistant.
 - If the user asks about the uploaded documents — use ONLY the provided document context to answer, citing sources.
+- If the user asks for a summary of each document — provide a clear, separate summary paragraph for EACH document shown in the context. Label each one.
 - If the user asks about documents but the context is empty or irrelevant — say you couldn't find relevant information in the uploaded documents, and suggest they try rephrasing or uploading more PDFs.
 - Never make up information. Never say you have no context if the user is just greeting you."""
 
@@ -35,6 +36,10 @@ class AnswerSynthesizer:
         else:
             prompt = SYNTHESIS_PROMPT.format(context=context_str, question=question)
 
+        # Scale max_tokens based on how many docs are in context
+        num_docs = len(context.get("doc_groups", {})) or 1
+        max_tokens = min(2000, max(1000, num_docs * 600))
+
         try:
             response = self.client.chat.completions.create(
                 messages=[
@@ -42,7 +47,7 @@ class AnswerSynthesizer:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.4,
-                max_tokens=1000,
+                max_tokens=max_tokens,
             )
 
             answer_text = response.choices[0].message.content.strip()
@@ -88,13 +93,27 @@ class AnswerSynthesizer:
                 parts.append(f"- {name} ({node_type})")
 
         chunks = context.get("chunks", [])
+        doc_groups = context.get("doc_groups", {})
+
         if chunks:
-            parts.append("\nRelevant text from documents:")
-            for chunk in chunks:
-                content = chunk[1] if len(chunk) > 1 else str(chunk)
-                page = chunk[2] if len(chunk) > 2 else "?"
-                section = chunk[3] if len(chunk) > 3 else ""
-                parts.append(f"[Page {page}{', ' + section if section else ''}]\n{content[:600]}")
+            if doc_groups and len(doc_groups) > 1:
+                # Multi-document: group chunks by document so the LLM sees clear per-doc sections
+                parts.append("\nRelevant text per document:")
+                for doc_label, doc_chunks in doc_groups.items():
+                    parts.append(f"\n--- {doc_label} ---")
+                    for chunk in doc_chunks:
+                        content = chunk[1] if len(chunk) > 1 else str(chunk)
+                        page = chunk[2] if len(chunk) > 2 else "?"
+                        section = chunk[3] if len(chunk) > 3 else ""
+                        # Increased from 600 → 1500 chars per chunk for richer summaries
+                        parts.append(f"[Page {page}{', ' + section if section else ''}]\n{content[:1500]}")
+            else:
+                parts.append("\nRelevant text from documents:")
+                for chunk in chunks:
+                    content = chunk[1] if len(chunk) > 1 else str(chunk)
+                    page = chunk[2] if len(chunk) > 2 else "?"
+                    section = chunk[3] if len(chunk) > 3 else ""
+                    parts.append(f"[Page {page}{', ' + section if section else ''}]\n{content[:1500]}")
 
         return "\n".join(parts) if parts else "No document context available."
 
