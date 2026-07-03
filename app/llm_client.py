@@ -52,7 +52,7 @@ class FallbackLLMClient:
             providers.append({
                 "name": "opencode",
                 "client": openai.OpenAI(api_key=opencode_api_key, base_url="https://opencode.ai/zen/v1"),
-                "model": "deepseek-v4-flash-free",
+                "model": "nemotron-3-ultra-free",
             })
         if not providers:
             raise ValueError("At least one API key must be set")
