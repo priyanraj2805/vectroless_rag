@@ -54,13 +54,13 @@ async def chat(request: ChatRequest):
         stats = db.get_graph_stats()
         has_documents = stats["documents"] > 0 and stats["chunks"] > 0
 
-        synthesizer = AnswerSynthesizer(groq_key=settings.groq_api_key, openrouter_key=settings.openrouter_api_key, opencode_key=settings.opencode_api_key)
+        synthesizer = AnswerSynthesizer(openrouter_key=settings.openrouter_api_key, opencode_key=settings.opencode_api_key)
 
         if not has_documents or synthesizer._is_conversational(request.question):
             context = {"nodes": [], "chunks": [], "doc_groups": {}}
             result = synthesizer.synthesize(request.question, context, has_documents=False)
         else:
-            planner = QueryPlanner(groq_key=settings.groq_api_key, openrouter_key=settings.openrouter_api_key, opencode_key=settings.opencode_api_key)
+            planner = QueryPlanner(openrouter_key=settings.openrouter_api_key, opencode_key=settings.opencode_api_key)
             executor = QueryExecutor(db)
 
             # Plan cache key includes doc_key so different doc selections get different plans

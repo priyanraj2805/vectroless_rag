@@ -15,10 +15,10 @@ def get_db():
     return Database(settings.database_path)
 
 
-def process_pdf_background(pdf_path: str, groq_key: str, openrouter_key: str, opencode_key: str, redis_url: str):
+def process_pdf_background(pdf_path: str, openrouter_key: str, opencode_key: str, redis_url: str):
     db = Database(settings.database_path)
     try:
-        pipeline = IngestionPipeline(db, groq_key=groq_key, openrouter_key=openrouter_key, opencode_key=opencode_key, redis_url=redis_url)
+        pipeline = IngestionPipeline(db, openrouter_key=openrouter_key, opencode_key=opencode_key, redis_url=redis_url)
         pipeline.ingest(pdf_path)
         # Bump version after ingestion completes — invalidates all answer/plan caches
         from app.cache import get_redis, bump_version
@@ -42,7 +42,7 @@ async def upload_pdfs(files: List[UploadFile] = File(...), background_tasks: Bac
             content = await file.read()
             f.write(content)
 
-        executor.submit(process_pdf_background, save_path, settings.groq_api_key, settings.openrouter_api_key, settings.opencode_api_key, settings.redis_url)
+        executor.submit(process_pdf_background, save_path, settings.openrouter_api_key, settings.opencode_api_key, settings.redis_url)
         results.append({"filename": file.filename, "status": "processing"})
 
     return {"documents": results}

@@ -38,16 +38,10 @@ class _Chat:
 
 
 class FallbackLLMClient:
-    """Tries Groq → OpenRouter → OpenCode Zen in order, falling back on rate limit or credit errors."""
+    """Tries OpenRouter first, falls back to OpenCode Zen on rate limit or credit errors."""
 
-    def __init__(self, groq_api_key: str = "", openrouter_api_key: str = "", opencode_api_key: str = ""):
+    def __init__(self, openrouter_api_key: str = "", opencode_api_key: str = ""):
         providers = []
-        if groq_api_key:
-            providers.append({
-                "name": "groq",
-                "client": openai.OpenAI(api_key=groq_api_key, base_url="https://api.groq.com/openai/v1"),
-                "model": "llama-3.1-8b-instant",
-            })
         if openrouter_api_key:
             providers.append({
                 "name": "openrouter",
@@ -61,5 +55,5 @@ class FallbackLLMClient:
                 "model": "nemotron-3-ultra-free",
             })
         if not providers:
-            raise ValueError("At least one API key must be set")
+            raise ValueError("At least one of openrouter_api_key or opencode_api_key must be set")
         self.chat = _Chat(providers)

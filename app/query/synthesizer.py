@@ -24,8 +24,8 @@ No documents have been uploaded yet. Respond by letting them know they need to u
 
 
 class AnswerSynthesizer:
-    def __init__(self, groq_key: str = "", openrouter_key: str = "", opencode_key: str = ""):
-        self.client = FallbackLLMClient(groq_api_key=groq_key, openrouter_api_key=openrouter_key, opencode_api_key=opencode_key)
+    def __init__(self, openrouter_key: str = "", opencode_key: str = ""):
+        self.client = FallbackLLMClient(openrouter_api_key=openrouter_key, opencode_api_key=opencode_key)
 
     def synthesize(self, question: str, context: Dict[str, List], has_documents: bool = True) -> Dict:
         context_str = self._format_context(context)

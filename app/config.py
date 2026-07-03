@@ -2,7 +2,6 @@ from pydantic_settings import BaseSettings
 from pathlib import Path
 
 class Settings(BaseSettings):
-    groq_api_key: str = ""
     openrouter_api_key: str = ""
     opencode_api_key: str = ""
     redis_url: str = ""

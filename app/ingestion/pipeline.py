@@ -9,11 +9,11 @@ from app.ingestion.graph_builder import GraphBuilder
 
 
 class IngestionPipeline:
-    def __init__(self, db: Database, groq_key: str = "", openrouter_key: str = "", opencode_key: str = "", redis_url: str = ""):
+    def __init__(self, db: Database, openrouter_key: str = "", opencode_key: str = "", redis_url: str = ""):
         self.db = db
         self.parser = PDFParser()
         self.chunker = TextChunker()
-        self.extractor = EntityExtractor(groq_key=groq_key, openrouter_key=openrouter_key, opencode_key=opencode_key, redis_url=redis_url)
+        self.extractor = EntityExtractor(openrouter_key=openrouter_key, opencode_key=opencode_key, redis_url=redis_url)
         self.embedder = Embedder()
         self.graph_builder = GraphBuilder(db)
 
