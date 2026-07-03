@@ -305,6 +305,9 @@ async function sendMessage() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ question, document_ids: selectedDocumentIds.length > 0 ? selectedDocumentIds : null }),
         });
+        if (!response.ok) {
+            throw new Error(`Server error ${response.status} — please try again`);
+        }
         const data = await response.json();
 
         let html = escapeHtml(data.answer).replace(/\n/g, '<br>');

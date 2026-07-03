@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request, Response
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from app.api.upload import router as upload_router
 from app.api.chat import router as chat_router
@@ -18,6 +18,14 @@ class NoCacheMiddleware(BaseHTTPMiddleware):
 
 app = FastAPI(title="Vectorless RAG", version="0.1.0")
 app.add_middleware(NoCacheMiddleware)
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=500,
+        content={"answer": f"Server error: {str(exc)}", "sources": [], "entities_found": 0, "chunks_used": 0},
+    )
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 app.include_router(upload_router)
