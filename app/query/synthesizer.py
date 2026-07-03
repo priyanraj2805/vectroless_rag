@@ -67,6 +67,17 @@ class AnswerSynthesizer:
                 "chunk_count": 0,
             }
 
+    def _is_conversational(self, question: str) -> bool:
+        GREETINGS = {
+            'hi', 'hii', 'hiii', 'hello', 'hey', 'howdy', 'hiya', 'yo', 'sup',
+            'good morning', 'good afternoon', 'good evening', 'good night',
+            'how are you', 'how r u', 'whats up', "what's up",
+            'thanks', 'thank you', 'ty', 'thx', 'bye', 'goodbye', 'ok', 'okay',
+            'cool', 'nice', 'great', 'awesome', 'got it', 'sure', 'alright',
+        }
+        q = question.lower().strip().rstrip('!?.,')
+        return q in GREETINGS or len(q.split()) <= 2
+
     def _format_context(self, context: Dict[str, List]) -> str:
         parts = []
 
