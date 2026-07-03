@@ -2,14 +2,14 @@ from app.llm_client import FallbackLLMClient
 from typing import Dict, List
 
 
-SYSTEM_PROMPT = """You are a helpful AI assistant that can both chat naturally and answer questions about uploaded documents.
+SYSTEM_PROMPT = """You are a document Q&A assistant. Answer questions strictly based on the provided document context.
 
-Behavior rules:
-- If the user says hi, hello, or asks a general conversational question — respond warmly and naturally like a friendly assistant.
-- If the user asks about the uploaded documents — use ONLY the provided document context to answer, citing sources.
-- If the user asks for a summary of each document — provide a clear, separate summary paragraph for EACH document shown in the context. Label each one.
-- If the user asks about documents but the context is empty or irrelevant — say you couldn't find relevant information in the uploaded documents, and suggest they try rephrasing or uploading more PDFs.
-- Never make up information. Never say you have no context if the user is just greeting you."""
+Rules:
+- Use ONLY the information from the document context below to answer.
+- If the context does not contain enough information to answer, say: "I couldn't find relevant information in the uploaded documents."
+- If the user asks for a summary of each document, provide a clear separate summary paragraph for EACH document shown in the context, labeled by document name.
+- Never make up information that is not in the context.
+- Do not engage in small talk or general conversation."""
 
 SYNTHESIS_PROMPT = """Document context from the knowledge graph:
 {context}
@@ -18,21 +18,20 @@ User question: {question}
 
 Answer:"""
 
-CONVERSATIONAL_PROMPT = """User message: {question}
+NO_DOCUMENTS_PROMPT = """The user asked: {question}
 
-Respond naturally. If they seem to be asking about documents, let them know they can upload PDFs and ask questions about them."""
+No documents have been uploaded yet. Respond by letting them know they need to upload PDF documents first before you can answer questions."""
 
 
 class AnswerSynthesizer:
-    def __init__(self, groq_key: str = "", openrouter_key: str = ""):
-        self.client = FallbackLLMClient(groq_api_key=groq_key, openrouter_api_key=openrouter_key)
+    def __init__(self, groq_key: str = "", openrouter_key: str = "", opencode_key: str = ""):
+        self.client = FallbackLLMClient(groq_api_key=groq_key, openrouter_api_key=openrouter_key, opencode_api_key=opencode_key)
 
     def synthesize(self, question: str, context: Dict[str, List], has_documents: bool = True) -> Dict:
         context_str = self._format_context(context)
-        is_conversational = not has_documents or self._is_conversational(question)
 
-        if is_conversational:
-            prompt = CONVERSATIONAL_PROMPT.format(question=question)
+        if not has_documents:
+            prompt = NO_DOCUMENTS_PROMPT.format(question=question)
         else:
             prompt = SYNTHESIS_PROMPT.format(context=context_str, question=question)
 
@@ -51,14 +50,13 @@ class AnswerSynthesizer:
             )
 
             answer_text = response.choices[0].message.content.strip()
-            sources = [] if is_conversational else self._extract_sources(context)
+            sources = [] if not has_documents else self._extract_sources(context)
 
             return {
                 "answer": answer_text,
                 "sources": sources,
                 "entity_count": len(context.get("nodes", [])),
                 "chunk_count": len(context.get("chunks", [])),
-                "conversational": is_conversational,
             }
 
         except Exception as e:
@@ -67,19 +65,7 @@ class AnswerSynthesizer:
                 "sources": [],
                 "entity_count": 0,
                 "chunk_count": 0,
-                "conversational": False,
             }
-
-    def _is_conversational(self, question: str) -> bool:
-        GREETINGS = {
-            'hi', 'hii', 'hiii', 'hello', 'hey', 'howdy', 'hiya', 'yo', 'sup',
-            'good morning', 'good afternoon', 'good evening', 'good night',
-            'how are you', 'how r u', 'whats up', "what's up",
-            'thanks', 'thank you', 'ty', 'thx', 'bye', 'goodbye', 'ok', 'okay',
-            'cool', 'nice', 'great', 'awesome', 'got it', 'sure', 'alright',
-        }
-        q = question.lower().strip().rstrip('!?.,')
-        return q in GREETINGS or len(q.split()) <= 2
 
     def _format_context(self, context: Dict[str, List]) -> str:
         parts = []
@@ -105,7 +91,6 @@ class AnswerSynthesizer:
                         content = chunk[1] if len(chunk) > 1 else str(chunk)
                         page = chunk[2] if len(chunk) > 2 else "?"
                         section = chunk[3] if len(chunk) > 3 else ""
-                        # Increased from 600 → 1500 chars per chunk for richer summaries
                         parts.append(f"[Page {page}{', ' + section if section else ''}]\n{content[:1500]}")
             else:
                 parts.append("\nRelevant text from documents:")
