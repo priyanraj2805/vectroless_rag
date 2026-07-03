@@ -14,9 +14,15 @@ class _Completions:
         last_err = None
         for provider in self._providers:
             try:
-                return provider["client"].chat.completions.create(
+                resp = provider["client"].chat.completions.create(
                     **{**kwargs, "model": provider["model"]}
                 )
+                # Treat None/empty content as provider failure and try next
+                if not resp.choices or not resp.choices[0].message.content:
+                    print(f"[{provider['name']}] empty response, switching to next provider...")
+                    last_err = RuntimeError(f"{provider['name']} returned empty response")
+                    continue
+                return resp
             except Exception as e:
                 if _is_fallback_error(e):
                     print(f"[{provider['name']}] limit hit, switching to next provider...")

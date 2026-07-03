@@ -53,13 +53,18 @@ class EntityExtractor:
                     max_tokens=800,
                 )
 
-                content = response.choices[0].message.content.strip()
+                raw = response.choices[0].message.content
+                if not raw or not raw.strip():
+                    return {"entities": [], "relationships": []}
+                content = raw.strip()
                 if content.startswith("```"):
                     content = content.split("\n", 1)[1]
                     if content.endswith("```"):
                         content = content[:-3]
 
                 result = json.loads(content)
+                if not isinstance(result, dict):
+                    return {"entities": [], "relationships": []}
                 result.setdefault("entities", [])
                 result.setdefault("relationships", [])
 
