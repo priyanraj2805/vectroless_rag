@@ -72,6 +72,12 @@ class Database:
         INSERT INTO nodes_fts(nodes_fts, rowid, name, attributes)
         VALUES ('delete', old.id, old.name, old.attributes);
     END;
+
+    CREATE TABLE IF NOT EXISTS embeddings (
+        chunk_id   INTEGER PRIMARY KEY,
+        vector     BLOB NOT NULL,
+        FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
+    );
     """
 
     def __init__(self, db_path: str):
@@ -176,6 +182,30 @@ class Database:
         return self.execute(
             "SELECT n.id, n.name, n.type, n.attributes, rank FROM nodes_fts fts JOIN nodes n ON n.id = fts.rowid WHERE nodes_fts MATCH ? ORDER BY rank LIMIT ?",
             (query, limit),
+        ).fetchall()
+
+    def insert_embedding(self, chunk_id: int, vector: bytes):
+        self.execute(
+            "INSERT OR REPLACE INTO embeddings (chunk_id, vector) VALUES (?, ?)",
+            (chunk_id, vector),
+        )
+        self.commit()
+
+    def get_all_embeddings(self, document_ids: list = None):
+        """Return [(chunk_id, vector_blob, content, page_number, section_title)]"""
+        if document_ids:
+            placeholders = ",".join("?" * len(document_ids))
+            return self.execute(
+                f"""SELECT e.chunk_id, e.vector, c.content, c.page_number, c.section_title
+                    FROM embeddings e
+                    JOIN chunks c ON c.id = e.chunk_id
+                    WHERE c.document_id IN ({placeholders})""",
+                tuple(document_ids),
+            ).fetchall()
+        return self.execute(
+            """SELECT e.chunk_id, e.vector, c.content, c.page_number, c.section_title
+               FROM embeddings e
+               JOIN chunks c ON c.id = e.chunk_id"""
         ).fetchall()
 
     def get_graph_stats(self):

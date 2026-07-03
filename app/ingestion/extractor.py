@@ -1,6 +1,7 @@
 import json
-from app.llm_client import FallbackLLMClient
 import time
+from app.llm_client import FallbackLLMClient
+from app.cache import get_redis, make_key, cache_get, cache_set
 from typing import Dict, List
 
 
@@ -27,10 +28,20 @@ Text:
 
 
 class EntityExtractor:
-    def __init__(self, groq_key: str = "", openrouter_key: str = ""):
+    def __init__(self, groq_key: str = "", openrouter_key: str = "", redis_url: str = ""):
         self.client = FallbackLLMClient(groq_api_key=groq_key, openrouter_api_key=openrouter_key)
+        self.r = get_redis(redis_url)
 
     def extract(self, text: str, document_id: int) -> Dict[str, List]:
+        # Check cache — same text chunk never re-extracted
+        cache_key = make_key("extract", text[:500])
+        cached = cache_get(self.r, cache_key)
+        if cached:
+            # Re-attach document_id since it varies per document
+            for entity in cached.get("entities", []):
+                entity["document_id"] = document_id
+            return cached
+
         for attempt in range(3):
             try:
                 response = self.client.chat.completions.create(
@@ -54,6 +65,9 @@ class EntityExtractor:
 
                 for entity in result["entities"]:
                     entity["document_id"] = document_id
+
+                # Cache for 24 hours (chunks rarely change)
+                cache_set(self.r, cache_key, result, ttl=86400)
 
                 return result
 

@@ -4,15 +4,17 @@ from app.storage.database import Database
 from app.ingestion.pdf_parser import PDFParser
 from app.ingestion.chunker import TextChunker
 from app.ingestion.extractor import EntityExtractor
+from app.ingestion.embedder import Embedder
 from app.ingestion.graph_builder import GraphBuilder
 
 
 class IngestionPipeline:
-    def __init__(self, db: Database, groq_key: str = "", openrouter_key: str = ""):
+    def __init__(self, db: Database, groq_key: str = "", openrouter_key: str = "", redis_url: str = ""):
         self.db = db
         self.parser = PDFParser()
         self.chunker = TextChunker()
-        self.extractor = EntityExtractor(groq_key=groq_key, openrouter_key=openrouter_key)
+        self.extractor = EntityExtractor(groq_key=groq_key, openrouter_key=openrouter_key, redis_url=redis_url)
+        self.embedder = Embedder()
         self.graph_builder = GraphBuilder(db)
 
     def ingest(self, pdf_path: str) -> int:
@@ -29,7 +31,7 @@ class IngestionPipeline:
 
             chunks = self.chunker.chunk_from_pages(parsed["pages"], document_id=doc_id)
 
-            # Insert all chunks into DB first
+            # Insert all chunks into DB and compute embeddings
             chunk_ids = []
             for chunk in chunks:
                 chunk_id = self.db.insert_chunk(
@@ -39,6 +41,9 @@ class IngestionPipeline:
                     section_title=chunk.get("section_title", ""),
                 )
                 chunk_ids.append(chunk_id)
+                # Compute and store embedding for this chunk
+                vector = self.embedder.embed(chunk["content"])
+                self.db.insert_embedding(chunk_id, vector)
 
             # Extract entities for all chunks in parallel (5 concurrent API calls)
             extractions = [None] * len(chunks)

@@ -1,10 +1,12 @@
 from typing import Dict, List, Optional
 from app.storage.database import Database
+from app.ingestion.embedder import Embedder
 
 
 class QueryExecutor:
     def __init__(self, db: Database):
         self.db = db
+        self.embedder = Embedder()
 
     def execute(self, plan: Dict, document_ids: Optional[List[int]] = None) -> Dict[str, List]:
         nodes = self._search_nodes(plan, document_ids)
@@ -29,7 +31,11 @@ class QueryExecutor:
                 related_nodes.extend(related)
 
         all_node_ids = list(set(node_ids + [r[0] for r in related_nodes]))
-        chunks = self._search_chunks(plan, all_node_ids, document_ids)
+
+        # Run FTS keyword search and semantic search, then merge
+        fts_chunks = self._search_chunks_fts(plan, document_ids)
+        semantic_chunks = self._search_chunks_semantic(plan, document_ids)
+        chunks = self._rrf_merge(fts_chunks, semantic_chunks, limit=plan.get("max_results", 10))
 
         return {
             "nodes": nodes + related_nodes,
@@ -78,7 +84,8 @@ class QueryExecutor:
 
         return results
 
-    def _search_chunks(self, plan: Dict, node_ids: List[int], document_ids: Optional[List[int]] = None) -> List:
+    def _search_chunks_fts(self, plan: Dict, document_ids: Optional[List[int]] = None) -> List:
+        """BM25 keyword search over chunk text."""
         chunks = []
         search_terms = plan.get("search_terms", [])
         limit = plan.get("max_results", 10)
@@ -117,3 +124,53 @@ class QueryExecutor:
                 ).fetchall()
 
         return chunks
+
+    def _search_chunks_semantic(self, plan: Dict, document_ids: Optional[List[int]] = None) -> List:
+        """Cosine similarity search over stored embeddings."""
+        search_terms = plan.get("search_terms", [])
+        limit = plan.get("max_results", 10)
+
+        if not search_terms:
+            return []
+
+        # Embed the combined search query
+        query_text = " ".join(search_terms)
+        query_vec = self.embedder.embed_query(query_text)
+
+        # Load all stored embeddings (filtered by document if needed)
+        rows = self.db.get_all_embeddings(document_ids)
+        if not rows:
+            return []
+
+        # Score each chunk by cosine similarity
+        scored = []
+        for chunk_id, vector_blob, content, page_number, section_title in rows:
+            chunk_vec = self.embedder.from_bytes(vector_blob)
+            score = self.embedder.cosine_similarity(query_vec, chunk_vec)
+            scored.append((chunk_id, content, page_number, section_title, score))
+
+        # Return top-N sorted by similarity score descending
+        scored.sort(key=lambda x: x[4], reverse=True)
+        return scored[:limit]
+
+    def _rrf_merge(self, fts_chunks: List, semantic_chunks: List, limit: int = 10, k: int = 60) -> List:
+        """
+        Reciprocal Rank Fusion — merges two ranked lists into one.
+        Score = 1/(k + rank_fts) + 1/(k + rank_semantic)
+        Higher score = chunk appeared high in both lists.
+        """
+        scores: Dict[int, float] = {}
+        chunk_data: Dict[int, tuple] = {}
+
+        for rank, chunk in enumerate(fts_chunks):
+            chunk_id = chunk[0]
+            scores[chunk_id] = scores.get(chunk_id, 0) + 1 / (k + rank + 1)
+            chunk_data[chunk_id] = chunk
+
+        for rank, chunk in enumerate(semantic_chunks):
+            chunk_id = chunk[0]
+            scores[chunk_id] = scores.get(chunk_id, 0) + 1 / (k + rank + 1)
+            chunk_data[chunk_id] = chunk
+
+        ranked_ids = sorted(scores, key=lambda x: scores[x], reverse=True)[:limit]
+        return [chunk_data[cid] for cid in ranked_ids]
