@@ -4,6 +4,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from app.api.upload import router as upload_router
 from app.api.chat import router as chat_router
+from app.api.eval import router as eval_router
+import app.opik_tracer  # initialises Opik SDK if OPIK_API_KEY is set
 
 
 class NoCacheMiddleware(BaseHTTPMiddleware):
@@ -30,6 +32,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 app.mount("/static", StaticFiles(directory="static"), name="static")
 app.include_router(upload_router)
 app.include_router(chat_router)
+app.include_router(eval_router)
 
 
 @app.get("/")

@@ -4,17 +4,20 @@ from app.storage.database import Database
 from app.ingestion.pdf_parser import PDFParser
 from app.ingestion.chunker import TextChunker
 from app.ingestion.extractor import EntityExtractor
-from app.ingestion.embedder import Embedder
 from app.ingestion.graph_builder import GraphBuilder
 
 
 class IngestionPipeline:
-    def __init__(self, db: Database, openrouter_key: str = "", opencode_key: str = "", redis_url: str = ""):
+    def __init__(self, db: Database, groq_api_key: str = "", groq_base_url: str = "", groq_model: str = "",
+                 ollama_base_url: str = "", ollama_model: str = "", ollama_api_key: str = "", redis_url: str = ""):
         self.db = db
         self.parser = PDFParser()
         self.chunker = TextChunker()
-        self.extractor = EntityExtractor(openrouter_key=openrouter_key, opencode_key=opencode_key, redis_url=redis_url)
-        self.embedder = Embedder()
+        self.extractor = EntityExtractor(
+            groq_api_key=groq_api_key, groq_base_url=groq_base_url, groq_model=groq_model,
+            ollama_base_url=ollama_base_url, ollama_model=ollama_model, ollama_api_key=ollama_api_key,
+            redis_url=redis_url,
+        )
         self.graph_builder = GraphBuilder(db)
 
     def ingest(self, pdf_path: str) -> int:
@@ -32,38 +35,32 @@ class IngestionPipeline:
             chunks = self.chunker.chunk_from_pages(parsed["pages"], document_id=doc_id)
 
             # Step 1: Insert all chunks into DB in one transaction (no per-row commit)
-            chunk_ids = []
-            for chunk in chunks:
-                chunk_id = self.db.insert_chunk(
+            for i, chunk in enumerate(chunks):
+                self.db.insert_chunk(
                     document_id=doc_id,
                     content=chunk["content"],
                     page_number=chunk.get("page_number"),
                     section_title=chunk.get("section_title", ""),
+                    chunk_index=i,
                     auto_commit=False,
                 )
-                chunk_ids.append(chunk_id)
             self.db.commit()
 
-            # Step 2: Batch-embed all chunks in a single model forward pass
-            texts = [chunk["content"] for chunk in chunks]
-            vectors = self.embedder.embed_batch(texts)
+            # Step 2: Extract entities in batches of 5 chunks per LLM call, 2 concurrent batches
+            # Batching reduces LLM calls by ~5x, preventing rate limit exhaustion on both providers.
+            BATCH_SIZE = 5
+            batches = [chunks[i:i + BATCH_SIZE] for i in range(0, len(chunks), BATCH_SIZE)]
+            batch_texts = [[c["content"] for c in batch] for batch in batches]
 
-            # Step 3: Insert all embeddings in one transaction
-            for chunk_id, vector in zip(chunk_ids, vectors):
-                self.db.insert_embedding(chunk_id, vector, auto_commit=False)
-            self.db.commit()
-
-            # Step 4: Extract entities in parallel (5 concurrent LLM calls)
-            extractions = [None] * len(chunks)
-            with ThreadPoolExecutor(max_workers=5) as pool:
-                futures = {
-                    pool.submit(self.extractor.extract, chunk["content"], doc_id): i
-                    for i, chunk in enumerate(chunks)
-                }
+            extractions = []
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(self.extractor.extract_batch, bt, doc_id) for bt in batch_texts]
                 for future in as_completed(futures):
-                    extractions[futures[future]] = future.result()
+                    result = future.result()
+                    if result:
+                        extractions.append(result)
 
-            # Step 5: Build graph from extractions
+            # Step 3: Build graph from extractions
             for extraction in extractions:
                 if extraction:
                     self.graph_builder.build_graph(extraction, document_id=doc_id)

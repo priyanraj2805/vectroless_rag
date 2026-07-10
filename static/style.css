@@ -25,7 +25,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .file-list { flex: 1; overflow-y: auto; padding: 8px; }
 .empty-docs { padding: 20px 12px; text-align: center; color: #bbb; font-size: 13px; }
 
-.all-docs-btn { padding: 6px 10px; margin-bottom: 6px; font-size: 12px; color: #4a90d9; cursor: pointer; border-radius: 6px; transition: background 0.15s; }
+.all-docs-btn { padding: 6px 10px; margin-bottom: 4px; font-size: 12px; color: #4a90d9; cursor: pointer; border-radius: 6px; transition: background 0.15s; }
 .all-docs-btn:hover { background: #e3f2fd; }
 
 .file-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; margin-bottom: 4px; transition: background 0.15s; cursor: default; }
@@ -113,3 +113,58 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 
 /* ── Animations ── */
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+/* ── Tabs ── */
+.tabs { margin-left: auto; display: flex; gap: 4px; }
+.tab { padding: 6px 16px; border: none; border-radius: 8px; font-size: 13px; font-weight: 500; cursor: pointer; background: #f0f0f0; color: #666; transition: all 0.15s; }
+.tab:hover { background: #e3e3e3; }
+.tab.active { background: #4a90d9; color: #fff; }
+.eval-count-badge { display: inline-block; background: #fff; color: #4a90d9; font-size: 10px; font-weight: 700; border-radius: 10px; padding: 1px 6px; margin-left: 4px; }
+.tab.active .eval-count-badge { background: rgba(255,255,255,0.3); color: #fff; }
+
+/* ── Tab content ── */
+.tab-content { display: none; flex: 1; flex-direction: column; min-height: 0; overflow: hidden; }
+.tab-content.active { display: flex; }
+
+/* ── Evaluation tab layout ── */
+.eval-toolbar { padding: 12px 20px; background: #fff; border-bottom: 1px solid #e0e0e0; display: flex; align-items: center; justify-content: space-between; }
+.eval-toolbar span { font-size: 13px; color: #666; }
+#evalRunBtn { padding: 8px 20px; background: #4a90d9; color: #fff; border: none; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500; transition: background 0.2s; }
+#evalRunBtn:hover { background: #357abd; }
+#evalRunBtn:disabled { background: #b0c8e8; cursor: not-allowed; }
+
+.eval-body { flex: 1; overflow-y: auto; padding: 16px 20px; background: #f0f2f5; }
+.eval-empty { padding: 40px 20px; text-align: center; color: #aaa; font-size: 14px; }
+
+/* ── Average score cards ── */
+.avg-cards { display: flex; gap: 14px; margin-bottom: 20px; }
+.avg-card { flex: 1; background: #fff; border-radius: 12px; padding: 16px; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+.avg-value { font-size: 28px; font-weight: 700; margin-bottom: 4px; }
+.avg-label { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 8px; }
+.avg-bar { background: #f0f0f0; border-radius: 4px; height: 6px; overflow: hidden; }
+.avg-bar-fill { height: 100%; border-radius: 4px; transition: width 0.4s; }
+
+/* ── Per-question eval cards ── */
+.eval-card { background: #fff; border-radius: 10px; margin-bottom: 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.06); overflow: hidden; }
+.eval-card-header { display: flex; align-items: center; gap: 10px; padding: 12px 16px; cursor: pointer; user-select: none; }
+.eval-card-header:hover { background: #fafafa; }
+.eval-card-num { font-size: 11px; font-weight: 700; color: #bbb; min-width: 20px; }
+.eval-card-question { flex: 1; font-size: 13px; color: #333; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.eval-card-scores { display: flex; gap: 5px; }
+.score-pill { font-size: 11px; font-weight: 600; color: #fff; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
+.eval-chevron { font-size: 11px; color: #bbb; margin-left: 4px; }
+.eval-card-body { padding: 0 16px 14px 46px; font-size: 13px; color: #444; line-height: 1.6; border-top: 1px solid #f0f0f0; padding-top: 12px; }
+
+/* ── Citations — single flowing row ── */
+.cite-row { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 10px; }
+.cite-label { font-size: 11px; color: #aaa; font-weight: 500; margin-right: 2px; white-space: nowrap; }
+.cite-tag { font-size: 11px; color: #1a3a6e; background: #e8f0fb; border: 1px solid #c5d8f7; border-radius: 12px; padding: 2px 9px; white-space: nowrap; }
+
+/* ── Inline eval report card in chat ── */
+.eval-inline-card { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 2px 20px 10px 20px; padding: 8px 14px; background: #f8f9fc; border: 1px solid #e3e8f0; border-radius: 10px; font-size: 12px; }
+.eval-inline-label { font-size: 11px; font-weight: 700; color: #888; letter-spacing: 0.3px; margin-right: 2px; }
+.eval-metric-item { display: flex; align-items: center; gap: 5px; }
+.eval-metric-name { color: #999; font-size: 11px; }
+.eval-metric-val { font-weight: 700; font-size: 13px; }
+.eval-metric-sep { color: #d0d0d0; font-size: 12px; }
+.eval-pending { font-size: 11px; color: #bbb; font-style: italic; }

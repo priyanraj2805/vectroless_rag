@@ -1,11 +1,6 @@
 import openai
 
 
-def _is_fallback_error(e: Exception) -> bool:
-    msg = str(e).lower()
-    return any(x in msg for x in ["429", "402", "rate_limit", "insufficient", "credits", "quota"])
-
-
 class _Completions:
     def __init__(self, providers):
         self._providers = providers
@@ -24,11 +19,9 @@ class _Completions:
                     continue
                 return resp
             except Exception as e:
-                if _is_fallback_error(e):
-                    print(f"[{provider['name']}] limit hit, switching to next provider...")
-                    last_err = e
-                else:
-                    raise
+                # Always try the next provider — any error (rate limit, quota, network, etc.)
+                print(f"[{provider['name']}] error: {e!s:.120}, trying next provider...")
+                last_err = e
         raise last_err or RuntimeError("All LLM providers exhausted")
 
 
@@ -38,22 +31,44 @@ class _Chat:
 
 
 class FallbackLLMClient:
-    """Tries OpenRouter first, falls back to OpenCode Zen on rate limit or credit errors."""
+    """Answer LLMs: Groq (primary) → Ollama (fallback)."""
 
-    def __init__(self, openrouter_api_key: str = "", opencode_api_key: str = ""):
+    def __init__(self, groq_api_key: str = "", groq_base_url: str = "", groq_model: str = "",
+                 ollama_base_url: str = "", ollama_model: str = "", ollama_api_key: str = ""):
         providers = []
-        if openrouter_api_key:
+        if groq_api_key:
             providers.append({
-                "name": "openrouter",
-                "client": openai.OpenAI(api_key=openrouter_api_key, base_url="https://openrouter.ai/api/v1"),
-                "model": "meta-llama/llama-3.1-8b-instruct",
+                "name": "groq",
+                "client": openai.OpenAI(
+                    api_key=groq_api_key,
+                    base_url=groq_base_url or "https://api.groq.com/openai/v1",
+                ),
+                "model": groq_model or "llama-3.1-8b-instant",
             })
-        if opencode_api_key:
+        if ollama_base_url:
             providers.append({
-                "name": "opencode",
-                "client": openai.OpenAI(api_key=opencode_api_key, base_url="https://opencode.ai/zen/v1"),
-                "model": "nemotron-3-ultra-free",
+                "name": "ollama",
+                "client": openai.OpenAI(
+                    api_key=ollama_api_key or "ollama",
+                    base_url=ollama_base_url,
+                ),
+                "model": ollama_model or "gemma4:31b",
             })
         if not providers:
-            raise ValueError("At least one of openrouter_api_key or opencode_api_key must be set")
+            raise ValueError("At least one of groq_api_key or ollama_base_url must be set")
         self.chat = _Chat(providers)
+
+
+class OpenCodeClient:
+    """OpenCode — used only for eval/judge scoring."""
+
+    def __init__(self, api_key: str = "", base_url: str = "", model: str = ""):
+        client = openai.OpenAI(
+            api_key=api_key,
+            base_url=base_url or "https://opencode.ai/zen/v1",
+        )
+        self.chat = _Chat([{
+            "name": "opencode",
+            "client": client,
+            "model": model or "nemotron-3-ultra-free",
+        }])

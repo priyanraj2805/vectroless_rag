@@ -41,6 +41,7 @@ class Database:
         content TEXT NOT NULL,
         page_number INTEGER,
         section_title TEXT,
+        chunk_index INTEGER,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
     );
@@ -73,11 +74,6 @@ class Database:
         VALUES ('delete', old.id, old.name, old.attributes);
     END;
 
-    CREATE TABLE IF NOT EXISTS embeddings (
-        chunk_id   INTEGER PRIMARY KEY,
-        vector     BLOB NOT NULL,
-        FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE
-    );
     """
 
     def __init__(self, db_path: str):
@@ -89,9 +85,14 @@ class Database:
         self.conn.commit()
 
     def _migrate(self):
-        cols = {row[1] for row in self.conn.execute("PRAGMA table_info(documents)").fetchall()}
-        if "completed_at" not in cols:
+        docs_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(documents)").fetchall()}
+        if "completed_at" not in docs_cols:
             self.conn.execute("ALTER TABLE documents ADD COLUMN completed_at TIMESTAMP")
+
+        chunk_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(chunks)").fetchall()}
+        if "chunk_index" not in chunk_cols:
+            self.conn.execute("ALTER TABLE chunks ADD COLUMN chunk_index INTEGER")
+
         # Rebuild FTS indexes to fix any sync issues from previous failed writes
         try:
             self.conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
@@ -139,10 +140,10 @@ class Database:
         self.commit()
         return cursor.lastrowid
 
-    def insert_chunk(self, document_id: int, content: str, page_number: int = None, section_title: str = None, auto_commit: bool = True) -> int:
+    def insert_chunk(self, document_id: int, content: str, page_number: int = None, section_title: str = None, chunk_index: int = None, auto_commit: bool = True) -> int:
         cursor = self.execute(
-            "INSERT INTO chunks (document_id, content, page_number, section_title) VALUES (?, ?, ?, ?)",
-            (document_id, content, page_number, section_title),
+            "INSERT INTO chunks (document_id, content, page_number, section_title, chunk_index) VALUES (?, ?, ?, ?, ?)",
+            (document_id, content, page_number, section_title, chunk_index),
         )
         if auto_commit:
             self.commit()
@@ -183,31 +184,6 @@ class Database:
         return self.execute(
             "SELECT n.id, n.name, n.type, n.attributes, rank FROM nodes_fts fts JOIN nodes n ON n.id = fts.rowid WHERE nodes_fts MATCH ? ORDER BY rank LIMIT ?",
             (query, limit),
-        ).fetchall()
-
-    def insert_embedding(self, chunk_id: int, vector: bytes, auto_commit: bool = True):
-        self.execute(
-            "INSERT OR REPLACE INTO embeddings (chunk_id, vector) VALUES (?, ?)",
-            (chunk_id, vector),
-        )
-        if auto_commit:
-            self.commit()
-
-    def get_all_embeddings(self, document_ids: list = None):
-        """Return [(chunk_id, vector_blob, content, page_number, section_title)]"""
-        if document_ids:
-            placeholders = ",".join("?" * len(document_ids))
-            return self.execute(
-                f"""SELECT e.chunk_id, e.vector, c.content, c.page_number, c.section_title
-                    FROM embeddings e
-                    JOIN chunks c ON c.id = e.chunk_id
-                    WHERE c.document_id IN ({placeholders})""",
-                tuple(document_ids),
-            ).fetchall()
-        return self.execute(
-            """SELECT e.chunk_id, e.vector, c.content, c.page_number, c.section_title
-               FROM embeddings e
-               JOIN chunks c ON c.id = e.chunk_id"""
         ).fetchall()
 
     def get_graph_stats(self):

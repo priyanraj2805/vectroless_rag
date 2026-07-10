@@ -3,8 +3,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 from app.config import settings
 from app.storage.database import Database
-from app.query.planner import QueryPlanner
-from app.query.executor import QueryExecutor
+from app.query.hierarchical_retriever import HierarchicalRetriever
 from app.query.synthesizer import AnswerSynthesizer
 from app.cache import get_redis, get_version, make_versioned_key, cache_get, cache_set
 
@@ -42,7 +41,6 @@ async def chat(request: ChatRequest):
         # Get current version — changes whenever docs are added/deleted
         version = get_version(r)
         doc_key = str(sorted(effective_ids)) if effective_ids else "all"
-        num_docs = len(effective_ids) if effective_ids else 1
 
         # Versioned answer key — includes doc selection so different doc combos get different caches
         answer_key = make_versioned_key("answer", version, request.question, doc_key)
@@ -54,37 +52,47 @@ async def chat(request: ChatRequest):
         stats = db.get_graph_stats()
         has_documents = stats["documents"] > 0 and stats["chunks"] > 0
 
-        synthesizer = AnswerSynthesizer(openrouter_key=settings.openrouter_api_key, opencode_key=settings.opencode_api_key)
+        synthesizer = AnswerSynthesizer(
+            opencode_api_key=settings.opencode_api_key,
+            opencode_base_url=settings.opencode_base_url,
+            opencode_model=settings.opencode_model,
+        )
+        is_conversational = synthesizer._is_conversational(request.question)
 
-        if not has_documents or synthesizer._is_conversational(request.question):
+        if has_documents and not is_conversational and not effective_ids:
+            return {
+                "answer": "Please select at least one PDF from the sidebar before asking a question.",
+                "sources": [],
+                "entities_found": 0,
+                "chunks_used": 0,
+                "needs_selection": True,
+            }
+
+        if not has_documents or is_conversational:
             context = {"nodes": [], "chunks": [], "doc_groups": {}}
-            result = synthesizer.synthesize(request.question, context, has_documents=False)
+            result = synthesizer.synthesize(request.question, context, has_documents=has_documents and not is_conversational)
         else:
-            planner = QueryPlanner(openrouter_key=settings.openrouter_api_key, opencode_key=settings.opencode_api_key)
-            executor = QueryExecutor(db)
-
-            # Plan cache key includes doc_key so different doc selections get different plans
-            plan_key = make_versioned_key("plan", version, request.question, doc_key)
-            plan = cache_get(r, plan_key)
-            if plan:
-                print(f"[cache] Plan HIT v{version} — {request.question[:50]}")
-            else:
-                # Pass num_docs so the planner scales max_results correctly
-                plan = planner.plan(request.question, num_docs=num_docs)
-                cache_set(r, plan_key, plan, ttl=3600)
-
-            context = executor.execute(plan, document_ids=effective_ids)
+            retriever = HierarchicalRetriever(db, settings=settings)
+            context = retriever.retrieve(request.question, document_ids=effective_ids)
 
             # Build per-document groups for the synthesizer to present clear per-doc summaries
             context["doc_groups"] = _build_doc_groups(db, context["chunks"], effective_ids)
 
             result = synthesizer.synthesize(request.question, context, has_documents=True)
 
+        # Full chunk content for accurate eval scoring (not truncated like content_preview)
+        context_texts = [
+            c[1] for c in context.get("chunks", [])
+            if len(c) > 1 and isinstance(c[1], str) and c[1].strip()
+        ]
+
         response = {
             "answer": result["answer"],
             "sources": result.get("sources", []),
             "entities_found": result.get("entity_count", 0),
             "chunks_used": result.get("chunk_count", 0),
+            "trace_id": result.get("trace_id"),
+            "context_texts": context_texts,
         }
 
         cache_set(r, answer_key, response, ttl=3600)

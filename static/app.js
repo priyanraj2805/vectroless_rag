@@ -3,6 +3,7 @@ let pollInterval = null;
 let liveTimerInterval = null;
 let prevStatuses = {};
 let selectedDocumentIds = [];
+let sessionQuestions = [];
 
 document.addEventListener('DOMContentLoaded', () => {
     const dropzone = document.getElementById('dropzone');
@@ -21,7 +22,7 @@ document.addEventListener('DOMContentLoaded', () => {
     fileInput.addEventListener('change', (e) => { handleFiles(e.target.files); e.target.value = ''; });
 
     sendBtn.addEventListener('click', sendMessage);
-    chatInput.addEventListener('keypress', (e) => { if (e.key === 'Enter' && !e.shiftKey) sendMessage(); });
+    chatInput.addEventListener('keypress', (e) => { if (e.key === 'Enter' && !e.shiftKey && !sendBtn.disabled) sendMessage(); });
 
     loadDocuments();
     loadStats();
@@ -189,8 +190,13 @@ function renderDocuments() {
 
     let html = '';
 
-    if (selectedDocumentIds.length > 0) {
-        html += `<div class="all-docs-btn" onclick="clearDocumentSelection()">✕ Clear selection (${selectedDocumentIds.length})</div>`;
+    const readyDocs = documents.filter(d => d.status === 'ready');
+    const allSelected = readyDocs.length > 0 && readyDocs.every(d => selectedDocumentIds.includes(d.id));
+
+    if (readyDocs.length > 1) {
+        html += `<div class="all-docs-btn select-all-btn" onclick="toggleSelectAll()">
+            ${allSelected ? '☐ Deselect all' : `☑ Select all (${readyDocs.length})`}
+        </div>`;
     }
 
     html += documents.map(doc => {
@@ -254,6 +260,13 @@ function clearDocumentSelection() {
     renderDocuments();
 }
 
+function toggleSelectAll() {
+    const readyDocs = documents.filter(d => d.status === 'ready');
+    const allSelected = readyDocs.every(d => selectedDocumentIds.includes(d.id));
+    selectedDocumentIds = allSelected ? [] : readyDocs.map(d => d.id);
+    renderDocuments();
+}
+
 function updateChatContext() {
     const ctx = document.getElementById('chatContext');
     const input = document.getElementById('chatInput');
@@ -286,18 +299,51 @@ async function deleteDocument(id, e) {
     }
 }
 
+function isConversational(question) {
+    const GREETINGS = new Set([
+        'hi','hii','hiii','hello','hey','howdy','hiya','yo','sup',
+        'good morning','good afternoon','good evening','good night',
+        'how are you','how r u','whats up',"what's up",
+        'thanks','thank you','ty','thx','bye','goodbye','ok','okay',
+        'cool','nice','great','awesome','got it','sure','alright',
+    ]);
+    const ABOUT_YOU = [
+        'what do you do','what can you do','what is your work',
+        'what are you','who are you',
+        'tell me about you','tell me about yourself',
+        'about you','about yourself',
+        'what are your capabilities','what can you help with',
+        'what is your purpose','how do you work','what do you help with',
+        'what is your job','what are you for','what do you help me with',
+        'describe yourself','introduce yourself',
+    ];
+    const q = question.toLowerCase().trim().replace(/[!?.,]+$/, '');
+    if (GREETINGS.has(q)) return true;
+    return ABOUT_YOU.some(s => q === s || q.startsWith(s));
+}
+
 async function sendMessage() {
     const input = document.getElementById('chatInput');
     const question = input.value.trim();
     if (!question) return;
 
-    addMessage('user', escapeHtml(question));
+    const readyDocs = documents.filter(d => d.status === 'ready');
+    if (readyDocs.length > 0 && selectedDocumentIds.length === 0 && !isConversational(question)) {
+        showToast('Please select at least one PDF before asking a question.', 'error');
+        return;
+    }
+
+    // Store question context for eval — will be enriched with sources after response
+    const questionIndex = sessionQuestions.length;
+    const userMsgId = addMessage('user', escapeHtml(question));
+    sessionQuestions.push({ question, sources: [], document_ids: selectedDocumentIds.slice(), doc_names: [], msgId: userMsgId });
+    updateEvalCountBadge();
     input.value = '';
 
     const sendBtn = document.getElementById('sendBtn');
     sendBtn.disabled = true;
 
-    const thinkingId = addMessage('assistant', '<span class="thinking">Thinking...</span>', true);
+    const thinkingId = addMessage('assistant', '<span class="thinking">Thinking...</span>');
 
     try {
         const response = await fetch('/api/chat', {
@@ -312,12 +358,15 @@ async function sendMessage() {
 
         let html = escapeHtml(data.answer).replace(/\n/g, '<br>');
 
+        // Store answer + sources + full context texts + trace_id for accurate re-evaluation
+        sessionQuestions[questionIndex].answer = data.answer || '';
+        sessionQuestions[questionIndex].trace_id = data.trace_id || null;
+        sessionQuestions[questionIndex].context_texts = data.context_texts || [];
         if (data.sources && data.sources.length > 0) {
-            const refs = data.sources
-                .filter(s => s.section || s.page)
-                .map(s => `p.${s.page || '?'}${s.section ? ' — ' + escapeHtml(s.section) : ''}`)
-                .join(' · ');
-            if (refs) html += `<div class="msg-meta">Sources: ${refs}</div>`;
+            sessionQuestions[questionIndex].sources = data.sources;
+            const selectedDocs = documents.filter(d => selectedDocumentIds.includes(d.id));
+            sessionQuestions[questionIndex].doc_names = selectedDocs.map(d => d.filename);
+            html += buildCiteRow(data.sources);
         }
 
         if (data.chunks_used > 0) {
@@ -325,6 +374,12 @@ async function sendMessage() {
         }
 
         updateMessage(thinkingId, html);
+
+        // Auto-eval in background — insert report card in chat after the answer
+        if (data.context_texts && data.context_texts.length > 0 && !data.needs_selection) {
+            const reportId = insertEvalCard(thinkingId);
+            runAutoEval(question, data.answer, data.context_texts, data.trace_id || null, reportId);
+        }
     } catch (error) {
         updateMessage(thinkingId, 'Error: ' + error.message);
     } finally {
@@ -333,7 +388,7 @@ async function sendMessage() {
     }
 }
 
-function addMessage(role, content, returnId = false) {
+function addMessage(role, content) {
     const messages = document.getElementById('messages');
     const id = 'msg-' + Date.now() + Math.random();
     const div = document.createElement('div');
@@ -342,7 +397,7 @@ function addMessage(role, content, returnId = false) {
     div.innerHTML = `<div class="bubble">${content}</div>`;
     messages.appendChild(div);
     messages.scrollTop = messages.scrollHeight;
-    return returnId ? id : undefined;
+    return id;
 }
 
 function updateMessage(id, content) {
@@ -384,4 +439,274 @@ function escapeHtml(str) {
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
+}
+
+/* ── Tab switching ── */
+function switchTab(tab) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    document.getElementById('tab-btn-' + tab).classList.add('active');
+    document.getElementById('tab-' + tab).classList.add('active');
+    if (tab === 'eval') updateEvalSessionInfo();
+}
+
+/* ── Eval badge on tab button ── */
+function updateEvalCountBadge() {
+    const badge = document.getElementById('evalCountBadge');
+    if (sessionQuestions.length > 0) {
+        badge.textContent = sessionQuestions.length;
+        badge.style.display = 'inline-block';
+    } else {
+        badge.style.display = 'none';
+    }
+}
+
+function updateEvalSessionInfo() {
+    const n = sessionQuestions.length;
+    document.getElementById('evalSessionInfo').textContent =
+        n === 0 ? '0 questions asked this session'
+                : `${n} question${n > 1 ? 's' : ''} asked this session`;
+}
+
+/* ── Run Evaluation ── */
+async function runEvaluation() {
+    const btn = document.getElementById('evalRunBtn');
+    const empty = document.getElementById('evalEmpty');
+    const avgSection = document.getElementById('evalAverages');
+    const resultsSection = document.getElementById('evalResults');
+
+    if (sessionQuestions.length === 0) {
+        empty.textContent = 'No questions yet — ask something in the Chat tab first.';
+        empty.style.display = 'block';
+        avgSection.style.display = 'none';
+        resultsSection.innerHTML = '';
+        return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = 'Scoring...';
+    empty.textContent = `Scoring ${sessionQuestions.length} question${sessionQuestions.length > 1 ? 's' : ''} in parallel…`;
+    empty.style.display = 'block';
+    avgSection.style.display = 'none';
+    resultsSection.innerHTML = '';
+
+    try {
+        // Score in batches of 3 with 1s delay between batches to stay under Groq TPM limit
+        const BATCH_SIZE = 3;
+        const scoreResults = [];
+        for (let i = 0; i < sessionQuestions.length; i += BATCH_SIZE) {
+            if (i > 0) await new Promise(r => setTimeout(r, 1000));
+            const batch = sessionQuestions.slice(i, i + BATCH_SIZE);
+            const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+            const totalBatches = Math.ceil(sessionQuestions.length / BATCH_SIZE);
+            empty.textContent = `Scoring batch ${batchNum}/${totalBatches}…`;
+            const batchResults = await Promise.all(batch.map(async (q) => {
+                try {
+                    const ctxTexts = q.context_texts && q.context_texts.length > 0
+                        ? q.context_texts
+                        : (q.sources || []).map(s => s.content_preview).filter(Boolean);
+                    const res = await fetch('/api/eval/score', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            question: q.question,
+                            answer: q.answer || '',
+                            context_texts: ctxTexts,
+                            trace_id: q.trace_id || null,
+                        }),
+                    });
+                    const data = res.ok ? await res.json() : {};
+                    return { question: q.question, answer: q.answer || '', scores: data.scores || {}, sources: q.sources || [] };
+                } catch (e) {
+                    return { question: q.question, answer: q.answer || '', scores: {}, sources: q.sources || [] };
+                }
+            }));
+            scoreResults.push(...batchResults);
+        }
+
+        empty.style.display = 'none';
+
+        // Compute averages
+        const totals = { hallucination: [], answer_relevance: [], context_precision: [] };
+        scoreResults.forEach(r => {
+            Object.keys(totals).forEach(k => { if (r.scores[k] != null) totals[k].push(r.scores[k]); });
+        });
+        const avg = {};
+        Object.keys(totals).forEach(k => {
+            avg[k] = totals[k].length ? totals[k].reduce((a, b) => a + b, 0) / totals[k].length : null;
+        });
+
+        // Average score cards
+        avgSection.style.display = 'block';
+        document.getElementById('avgCards').innerHTML = ['hallucination', 'answer_relevance', 'context_precision'].map(metric => {
+            const val = avg[metric];
+            const pct = val != null ? Math.round(val * 100) : null;
+            const label = { hallucination: 'Hallucination', answer_relevance: 'Answer Relevance', context_precision: 'Context Precision' }[metric];
+            const color = metric === 'hallucination'
+                ? (pct > 30 ? '#e53935' : pct > 15 ? '#fb8c00' : '#43a047')
+                : (pct > 60 ? '#43a047' : pct > 30 ? '#fb8c00' : '#e53935');
+            return `<div class="avg-card">
+                <div class="avg-value" style="color:${color}">${pct !== null ? pct + '%' : 'N/A'}</div>
+                <div class="avg-label">${label}</div>
+                <div class="avg-bar"><div class="avg-bar-fill" style="width:${pct || 0}%;background:${color}"></div></div>
+            </div>`;
+        }).join('');
+
+        const scoreColor = (val, invert) => {
+            if (val === null) return '#999';
+            return invert ? (val > 30 ? '#e53935' : val > 15 ? '#fb8c00' : '#43a047')
+                          : (val > 60 ? '#43a047' : val > 30 ? '#fb8c00' : '#e53935');
+        };
+
+        // Per-question cards
+        resultsSection.innerHTML = scoreResults.map((r, i) => {
+            const s = r.scores || {};
+            const hPct  = s.hallucination     != null ? Math.round(s.hallucination * 100)     : null;
+            const arPct = s.answer_relevance  != null ? Math.round(s.answer_relevance * 100)  : null;
+            const cpPct = s.context_precision != null ? Math.round(s.context_precision * 100) : null;
+            const citationsHtml = r.sources && r.sources.length > 0 ? buildCiteRow(r.sources) : '';
+            return `<div class="eval-card">
+                <div class="eval-card-header" onclick="toggleEvalCard(${i})">
+                    <div class="eval-card-left">
+                        <span class="eval-card-num">${i + 1}</span>
+                        <span class="eval-card-question">${escapeHtml(r.question)}</span>
+                    </div>
+                    <div class="eval-card-scores">
+                        <span class="score-pill" style="background:${scoreColor(hPct,true)}">${hPct !== null ? hPct+'%' : '-'} H</span>
+                        <span class="score-pill" style="background:${scoreColor(arPct,false)}">${arPct !== null ? arPct+'%' : '-'} R</span>
+                        <span class="score-pill" style="background:${scoreColor(cpPct,false)}">${cpPct !== null ? cpPct+'%' : '-'} P</span>
+                    </div>
+                    <span class="eval-chevron" id="chevron-${i}">▼</span>
+                </div>
+                <div class="eval-card-body" id="evalBody-${i}" style="display:none">
+                    <p>${escapeHtml(r.answer || '').replace(/\n/g,'<br>')}</p>
+                    ${citationsHtml}
+                </div>
+            </div>`;
+        }).join('');
+
+    } catch (error) {
+        empty.textContent = 'Error: ' + error.message;
+        empty.style.display = 'block';
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Run Evaluation';
+    }
+}
+
+function toggleEvalCard(i) {
+    const body = document.getElementById('evalBody-' + i);
+    const chevron = document.getElementById('chevron-' + i);
+    const open = body.style.display === 'none';
+    body.style.display = open ? 'block' : 'none';
+    chevron.textContent = open ? '▲' : '▼';
+}
+
+function buildCiteRow(sources) {
+    // Group pages by document name
+    const grouped = {};
+    sources.forEach(src => {
+        const name = src.document ? src.document.split(' — ')[1] || src.document : 'Unknown';
+        if (!grouped[name]) grouped[name] = [];
+        const page = src.page || '?';
+        if (!grouped[name].includes(page)) grouped[name].push(page);
+    });
+    const chips = Object.entries(grouped).map(([name, pages]) =>
+        `<span class="cite-tag">📄 ${escapeHtml(name)} · pg.${pages.join(', ')}</span>`
+    ).join('');
+    return `<div class="cite-row"><span class="cite-label">Sources:</span>${chips}</div>`;
+}
+
+function insertEvalCard(afterMsgId) {
+    const messages = document.getElementById('messages');
+    const afterEl = document.getElementById(afterMsgId);
+    const id = 'eval-card-' + Date.now();
+    const div = document.createElement('div');
+    div.id = id;
+    div.className = 'eval-inline-card';
+    div.innerHTML = `<span class="eval-inline-label">📊 Evaluation</span><span class="eval-pending">Scoring…</span>`;
+    if (afterEl && afterEl.nextSibling) {
+        messages.insertBefore(div, afterEl.nextSibling);
+    } else {
+        messages.appendChild(div);
+    }
+    messages.scrollTop = messages.scrollHeight;
+    return id;
+}
+
+async function runAutoEval(question, answer, contextTexts, traceId, reportId) {
+    try {
+        const res = await fetch('/api/eval/score', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ question, answer, context_texts: contextTexts, trace_id: traceId }),
+        });
+        if (!res.ok) {
+            const el = document.getElementById(reportId);
+            if (el) el.innerHTML = `<span class="eval-inline-label">📊 Evaluation</span><span class="eval-pending">Scoring unavailable</span>`;
+            return;
+        }
+        const data = await res.json();
+        if (data.skipped) { document.getElementById(reportId)?.remove(); return; }
+        fillEvalCard(reportId, data.scores || {});
+    } catch (e) {
+        const el = document.getElementById(reportId);
+        if (el) el.innerHTML = `<span class="eval-inline-label">📊 Evaluation</span><span class="eval-pending">Scoring unavailable</span>`;
+    }
+}
+
+function fillEvalCard(reportId, scores) {
+    const el = document.getElementById(reportId);
+    if (!el) return;
+    const hPct  = scores.hallucination       != null ? Math.round(scores.hallucination * 100)       : null;
+    const arPct = scores.answer_relevance    != null ? Math.round(scores.answer_relevance * 100)    : null;
+    const cpPct = scores.context_precision   != null ? Math.round(scores.context_precision * 100)   : null;
+    const color = (val, invert) => {
+        if (val === null) return '#aaa';
+        return invert ? (val > 30 ? '#e53935' : val > 15 ? '#fb8c00' : '#43a047')
+                      : (val > 60 ? '#43a047' : val > 30 ? '#fb8c00' : '#e53935');
+    };
+    const metric = (label, val, invert) =>
+        `<span class="eval-metric-item">
+            <span class="eval-metric-name">${label}</span>
+            <span class="eval-metric-val" style="color:${color(val, invert)}">${val !== null ? val + '%' : '—'}</span>
+        </span>`;
+    el.innerHTML = `
+        <span class="eval-inline-label">📊 Evaluation</span>
+        ${metric('Hallucination', hPct, true)}
+        <span class="eval-metric-sep">·</span>
+        ${metric('Relevance', arPct, false)}
+        <span class="eval-metric-sep">·</span>
+        ${metric('Precision', cpPct, false)}
+    `;
+    document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
+}
+
+function updateQuestionWithScores(msgId, scores) {
+    // Called from runEvaluation() in eval tab — update existing eval card if present
+    // Find the eval card that was inserted after the assistant message for this question
+    fillEvalCard('eval-card-' + msgId, scores);
+}
+
+function toggleCitations(idOrIndex) {
+    // Handle both string IDs (chat citations) and numeric indices (eval citations)
+    if (typeof idOrIndex === 'string') {
+        // Chat window citations - idOrIndex is the full element ID
+        const content = document.getElementById(idOrIndex);
+        const button = content ? content.previousElementSibling : null;
+        if (content && button) {
+            const isHidden = content.style.display === 'none';
+            content.style.display = isHidden ? 'block' : 'none';
+            button.innerHTML = button.innerHTML.replace(isHidden ? '▶' : '▼', isHidden ? '▼' : '▶');
+        }
+    } else {
+        // Evaluation tab citations - idOrIndex is a numeric index
+        const content = document.getElementById('citations-' + idOrIndex);
+        const label = document.getElementById('citationsLabel-' + idOrIndex);
+        if (content && label) {
+            const open = content.style.display === 'none';
+            content.style.display = open ? 'block' : 'none';
+            label.textContent = open ? '▼ Hide citations' : `▶ Show ${content.children.length} citation${content.children.length > 1 ? 's' : ''}`;
+        }
+    }
 }

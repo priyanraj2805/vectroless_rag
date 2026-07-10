@@ -1,4 +1,5 @@
-from app.llm_client import FallbackLLMClient
+from app.llm_client import OpenCodeClient
+from app.opik_tracer import track, get_current_trace_id
 from typing import Dict, List
 
 
@@ -24,10 +25,16 @@ No documents have been uploaded yet. Respond by letting them know they need to u
 
 
 class AnswerSynthesizer:
-    def __init__(self, openrouter_key: str = "", opencode_key: str = ""):
-        self.client = FallbackLLMClient(openrouter_api_key=openrouter_key, opencode_api_key=opencode_key)
+    def __init__(self, opencode_api_key: str = "", opencode_base_url: str = "", opencode_model: str = ""):
+        self.client = OpenCodeClient(
+            api_key=opencode_api_key,
+            base_url=opencode_base_url,
+            model=opencode_model,
+        )
 
+    @track
     def synthesize(self, question: str, context: Dict[str, List], has_documents: bool = True) -> Dict:
+        trace_id = get_current_trace_id()
         context_str = self._format_context(context)
 
         if not has_documents:
@@ -50,13 +57,14 @@ class AnswerSynthesizer:
             )
 
             answer_text = response.choices[0].message.content.strip()
-            sources = [] if not has_documents else self._extract_sources(context)
+            sources = [] if not has_documents else self._extract_sources(context, context.get("doc_groups"))
 
             return {
                 "answer": answer_text,
                 "sources": sources,
                 "entity_count": len(context.get("nodes", [])),
                 "chunk_count": len(context.get("chunks", [])),
+                "trace_id": trace_id,
             }
 
         except Exception as e:
@@ -65,6 +73,7 @@ class AnswerSynthesizer:
                 "sources": [],
                 "entity_count": 0,
                 "chunk_count": 0,
+                "trace_id": trace_id,
             }
 
     def _is_conversational(self, question: str) -> bool:
@@ -75,8 +84,20 @@ class AnswerSynthesizer:
             'thanks', 'thank you', 'ty', 'thx', 'bye', 'goodbye', 'ok', 'okay',
             'cool', 'nice', 'great', 'awesome', 'got it', 'sure', 'alright',
         }
+        ABOUT_YOU = (
+            'what do you do', 'what can you do', 'what is your work',
+            'what are you', 'who are you',
+            'tell me about you', 'tell me about yourself',
+            'about you', 'about yourself',
+            'what are your capabilities', 'what can you help with',
+            'what is your purpose', 'how do you work', 'what do you help with',
+            'what is your job', 'what are you for', 'what do you help me with',
+            'describe yourself', 'introduce yourself',
+        )
         q = question.lower().strip().rstrip('!?.,')
-        return q in GREETINGS or len(q.split()) <= 2
+        if q in GREETINGS:
+            return True
+        return any(q == s or q.startswith(s) for s in ABOUT_YOU)
 
     def _format_context(self, context: Dict[str, List]) -> str:
         parts = []
@@ -113,16 +134,53 @@ class AnswerSynthesizer:
 
         return "\n".join(parts) if parts else "No document context available."
 
-    def _extract_sources(self, context: Dict[str, List]) -> List[Dict]:
+    def _extract_sources(self, context: Dict[str, List], doc_groups: Dict[str, List] = None) -> List[Dict]:
+        """Extract sources with document names from context, filtered to high-relevance docs only."""
         sources = []
         seen = set()
+
+        # Build chunk_id -> document label mapping from doc_groups
+        chunk_to_doc = {}
+        if doc_groups:
+            for doc_label, chunks in doc_groups.items():
+                for chunk in chunks:
+                    chunk_id = chunk[0] if len(chunk) > 0 else None
+                    if chunk_id:
+                        chunk_to_doc[chunk_id] = doc_label
+
+        # Build chunk_id -> doc_id mapping for score filtering
+        chunk_to_doc_id = {}
         for chunk in context.get("chunks", []):
+            chunk_id = chunk[0] if len(chunk) > 0 else None
+            doc_id = chunk[5] if len(chunk) > 5 else None
+            if chunk_id and doc_id:
+                chunk_to_doc_id[chunk_id] = doc_id
+
+        # Only cite documents that scored >= 65% of the top-scoring document
+        doc_scores = context.get("doc_scores", {})
+        if doc_scores:
+            best = max(doc_scores.values())
+            citation_threshold = best * 0.65
+            allowed_doc_ids = {doc_id for doc_id, score in doc_scores.items() if score >= citation_threshold}
+        else:
+            allowed_doc_ids = None
+
+        for chunk in context.get("chunks", []):
+            chunk_id = chunk[0] if len(chunk) > 0 else None
+            doc_id = chunk_to_doc_id.get(chunk_id)
+
+            # Skip chunks from low-relevance documents
+            if allowed_doc_ids is not None and doc_id not in allowed_doc_ids:
+                continue
+
+            doc_label = chunk_to_doc.get(chunk_id, "Unknown Document")
             source = {
+                "document": doc_label,
                 "content_preview": (chunk[1][:200] if len(chunk) > 1 else "") if isinstance(chunk[1], str) else "",
                 "page": chunk[2] if len(chunk) > 2 else None,
                 "section": chunk[3] if len(chunk) > 3 else "",
             }
-            key = (source["page"], source["section"])
+            key = (doc_label, source["page"], source["section"])
             if key not in seen:
                 seen.add(key)
                 sources.append(source)

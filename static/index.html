@@ -44,21 +44,45 @@
             <div class="chat-header">
                 <h1>Vectorless RAG</h1>
                 <span class="badge" id="headerBadge">No documents</span>
+                <div class="tabs">
+                    <button class="tab active" id="tab-btn-chat" onclick="switchTab('chat')">Chat</button>
+                    <button class="tab" id="tab-btn-eval" onclick="switchTab('eval')">
+                        Evaluation <span class="eval-count-badge" id="evalCountBadge" style="display:none">0</span>
+                    </button>
+                </div>
             </div>
-            <div class="chat-context" id="chatContext"></div>
-            <div class="messages" id="messages">
-                <div class="message assistant">
-                    <div class="bubble">
-                        Hi! I'm your document assistant.<br><br>
-                        Upload PDFs using the sidebar on the left — once they show <strong style="color:#2e7d32">✓ Ready</strong>, you can ask me anything about them.<br><br>
-                       
+
+            <!-- Chat Tab -->
+            <div class="tab-content active" id="tab-chat">
+                <div class="chat-context" id="chatContext"></div>
+                <div class="messages" id="messages">
+                    <div class="message assistant">
+                        <div class="bubble">
+                            Hi! I'm your document assistant.<br><br>
+                            Upload PDFs using the sidebar on the left — once they show <strong style="color:#2e7d32">✓ Ready</strong>, you can ask me anything about them.
+                        </div>
+                    </div>
+                </div>
+                <div class="input-area">
+                    <div class="input-row">
+                        <input type="text" id="chatInput" placeholder="Ask a question or say hi..." autocomplete="off">
+                        <button id="sendBtn">Send</button>
                     </div>
                 </div>
             </div>
-            <div class="input-area">
-                <div class="input-row">
-                    <input type="text" id="chatInput" placeholder="Ask a question or say hi..." autocomplete="off">
-                    <button id="sendBtn">Send</button>
+
+            <!-- Evaluation Tab -->
+            <div class="tab-content" id="tab-eval">
+                <div class="eval-toolbar">
+                    <span id="evalSessionInfo">0 questions asked this session</span>
+                    <button id="evalRunBtn" onclick="runEvaluation()">Run Evaluation</button>
+                </div>
+                <div class="eval-body">
+                    <div id="evalEmpty" class="eval-empty">Ask questions in the Chat tab first, then click Run Evaluation to score them.</div>
+                    <div id="evalAverages" style="display:none">
+                        <div id="avgCards" class="avg-cards"></div>
+                    </div>
+                    <div id="evalResults"></div>
                 </div>
             </div>
         </div>
