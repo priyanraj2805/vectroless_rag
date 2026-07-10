@@ -72,3 +72,42 @@ class OpenCodeClient:
             "client": client,
             "model": model or "nemotron-3-ultra-free",
         }])
+
+
+class AnswerLLMClient:
+    """Answer generation: OpenCode → Groq → Ollama fallback chain."""
+
+    def __init__(self, opencode_api_key: str = "", opencode_base_url: str = "", opencode_model: str = "",
+                 groq_api_key: str = "", groq_base_url: str = "", groq_model: str = "",
+                 ollama_base_url: str = "", ollama_model: str = "", ollama_api_key: str = ""):
+        providers = []
+        if opencode_api_key:
+            providers.append({
+                "name": "opencode",
+                "client": openai.OpenAI(
+                    api_key=opencode_api_key,
+                    base_url=opencode_base_url or "https://opencode.ai/zen/v1",
+                ),
+                "model": opencode_model or "nemotron-3-ultra-free",
+            })
+        if groq_api_key:
+            providers.append({
+                "name": "groq",
+                "client": openai.OpenAI(
+                    api_key=groq_api_key,
+                    base_url=groq_base_url or "https://api.groq.com/openai/v1",
+                ),
+                "model": groq_model or "llama-3.1-8b-instant",
+            })
+        if ollama_base_url:
+            providers.append({
+                "name": "ollama",
+                "client": openai.OpenAI(
+                    api_key=ollama_api_key or "ollama",
+                    base_url=ollama_base_url,
+                ),
+                "model": ollama_model or "gemma4:31b",
+            })
+        if not providers:
+            raise ValueError("At least one provider must be configured")
+        self.chat = _Chat(providers)

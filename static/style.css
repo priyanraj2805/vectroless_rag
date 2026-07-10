@@ -161,7 +161,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .cite-tag { font-size: 11px; color: #1a3a6e; background: #e8f0fb; border: 1px solid #c5d8f7; border-radius: 12px; padding: 2px 9px; white-space: nowrap; }
 
 /* ── Inline eval report card in chat ── */
-.eval-inline-card { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 2px 20px 10px 20px; padding: 8px 14px; background: #f8f9fc; border: 1px solid #e3e8f0; border-radius: 10px; font-size: 12px; }
+.eval-inline-card { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px; padding-top: 8px; border-top: 1px solid #e3e8f0; font-size: 12px; }
 .eval-inline-label { font-size: 11px; font-weight: 700; color: #888; letter-spacing: 0.3px; margin-right: 2px; }
 .eval-metric-item { display: flex; align-items: center; gap: 5px; }
 .eval-metric-name { color: #999; font-size: 11px; }

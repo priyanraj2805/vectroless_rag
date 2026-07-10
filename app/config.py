@@ -22,8 +22,8 @@ class Settings(BaseSettings):
     retrieval_min_documents: int = 1
     retrieval_max_documents: int = 5
     retrieval_doc_score_threshold: float = 0.4
-    retrieval_rerank_enabled: bool = False   # cross-encoder reranker; off = fully vectorless
-    retrieval_rerank_top_n: int = 10
+    retrieval_rerank_enabled: bool = True    # cross-encoder reranker (ms-marco-MiniLM-L-6-v2)
+    retrieval_rerank_top_n: int = 15
     retrieval_neighbor_window: int = 1
     retrieval_weight_bm25: float = 0.50
     retrieval_weight_heading: float = 0.20

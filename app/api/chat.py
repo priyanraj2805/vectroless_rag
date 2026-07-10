@@ -56,6 +56,12 @@ async def chat(request: ChatRequest):
             opencode_api_key=settings.opencode_api_key,
             opencode_base_url=settings.opencode_base_url,
             opencode_model=settings.opencode_model,
+            groq_api_key=settings.groq_api_key,
+            groq_base_url=settings.groq_base_url,
+            groq_model=settings.groq_model,
+            ollama_base_url=settings.ollama_base_url,
+            ollama_model=settings.ollama_model,
+            ollama_api_key=settings.ollama_api_key,
         )
         is_conversational = synthesizer._is_conversational(request.question)
 
@@ -75,16 +81,30 @@ async def chat(request: ChatRequest):
             retriever = HierarchicalRetriever(db, settings=settings)
             context = retriever.retrieve(request.question, document_ids=effective_ids)
 
+            # If BM25 returned nothing (e.g. summary/overview queries whose keywords
+            # don't appear literally in the text), fall back to the first N chunks so
+            # the LLM still has document content to work with.
+            if not context.get("chunks") and effective_ids:
+                placeholders = ",".join("?" * len(effective_ids))
+                fallback = db.execute(
+                    f"SELECT id, content, page_number, section_title, -1.0, document_id, chunk_index "
+                    f"FROM chunks WHERE document_id IN ({placeholders}) "
+                    f"ORDER BY document_id, chunk_index LIMIT 12",
+                    tuple(effective_ids),
+                ).fetchall()
+                context["chunks"] = fallback
+
             # Build per-document groups for the synthesizer to present clear per-doc summaries
             context["doc_groups"] = _build_doc_groups(db, context["chunks"], effective_ids)
 
             result = synthesizer.synthesize(request.question, context, has_documents=True)
 
-        # Full chunk content for accurate eval scoring (not truncated like content_preview)
-        context_texts = [
-            c[1] for c in context.get("chunks", [])
-            if len(c) > 1 and isinstance(c[1], str) and c[1].strip()
-        ]
+        # Sort by BM25 rank (index 4) so judge sees most relevant chunks first.
+        # FTS5 BM25 scores are negative — more negative = more relevant.
+        # Neighbor-expanded chunks have rank=0 and naturally fall to the end.
+        _raw_chunks = [c for c in context.get("chunks", []) if len(c) > 1 and isinstance(c[1], str) and c[1].strip()]
+        _raw_chunks.sort(key=lambda c: c[4] if len(c) > 4 and c[4] is not None else 0)
+        context_texts = [c[1] for c in _raw_chunks]
 
         response = {
             "answer": result["answer"],

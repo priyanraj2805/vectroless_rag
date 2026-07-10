@@ -1,4 +1,4 @@
-from app.llm_client import OpenCodeClient
+from app.llm_client import AnswerLLMClient
 from app.opik_tracer import track, get_current_trace_id
 from typing import Dict, List
 
@@ -25,11 +25,13 @@ No documents have been uploaded yet. Respond by letting them know they need to u
 
 
 class AnswerSynthesizer:
-    def __init__(self, opencode_api_key: str = "", opencode_base_url: str = "", opencode_model: str = ""):
-        self.client = OpenCodeClient(
-            api_key=opencode_api_key,
-            base_url=opencode_base_url,
-            model=opencode_model,
+    def __init__(self, opencode_api_key: str = "", opencode_base_url: str = "", opencode_model: str = "",
+                 groq_api_key: str = "", groq_base_url: str = "", groq_model: str = "",
+                 ollama_base_url: str = "", ollama_model: str = "", ollama_api_key: str = ""):
+        self.client = AnswerLLMClient(
+            opencode_api_key=opencode_api_key, opencode_base_url=opencode_base_url, opencode_model=opencode_model,
+            groq_api_key=groq_api_key, groq_base_url=groq_base_url, groq_model=groq_model,
+            ollama_base_url=ollama_base_url, ollama_model=ollama_model, ollama_api_key=ollama_api_key,
         )
 
     @track
@@ -37,14 +39,21 @@ class AnswerSynthesizer:
         trace_id = get_current_trace_id()
         context_str = self._format_context(context)
 
-        if not has_documents:
-            prompt = NO_DOCUMENTS_PROMPT.format(question=question)
-        else:
-            prompt = SYNTHESIS_PROMPT.format(context=context_str, question=question)
+        # If the user pasted a large block of text (equations, page refs, etc.) along with
+        # their question, truncate to the first 600 chars so the LLM sees only the question.
+        # BM25 retrieval already used the full text for keyword matching upstream.
+        llm_question = question[:600].strip() if len(question) > 600 else question
 
-        # Scale max_tokens based on how many docs are in context
+        if not has_documents:
+            prompt = NO_DOCUMENTS_PROMPT.format(question=llm_question)
+        else:
+            prompt = SYNTHESIS_PROMPT.format(context=context_str, question=llm_question)
+
+        # Scale max_tokens by doc count and question length (multi-question queries need more room)
         num_docs = len(context.get("doc_groups", {})) or 1
-        max_tokens = min(2000, max(1000, num_docs * 600))
+        question_lines = len([l for l in question.strip().splitlines() if l.strip()])
+        multi_q_boost = min(question_lines, 6) * 200  # 200 extra tokens per question line, cap at 6
+        max_tokens = min(4000, max(1500, num_docs * 600 + multi_q_boost))
 
         try:
             response = self.client.chat.completions.create(
@@ -165,7 +174,20 @@ class AnswerSynthesizer:
         else:
             allowed_doc_ids = None
 
-        for chunk in context.get("chunks", []):
+        # Only cite directly-matched chunks (rank != 0).
+        # Neighbor-expanded chunks have rank=0 and are included for LLM context
+        # but should not appear as citations — they weren't directly relevant.
+        direct_chunks = [c for c in context.get("chunks", []) if len(c) > 4 and c[4] != 0]
+        # Fall back to all chunks if nothing was directly matched (e.g. all neighbors)
+        cite_chunks = direct_chunks if direct_chunks else context.get("chunks", [])
+
+        # Sort by BM25 rank — most negative = most relevant first
+        cite_chunks = sorted(cite_chunks, key=lambda c: c[4] if len(c) > 4 and c[4] is not None else 0)
+
+        pages_per_doc: Dict[str, int] = {}
+        MAX_PAGES_PER_DOC = 5
+
+        for chunk in cite_chunks:
             chunk_id = chunk[0] if len(chunk) > 0 else None
             doc_id = chunk_to_doc_id.get(chunk_id)
 
@@ -182,6 +204,9 @@ class AnswerSynthesizer:
             }
             key = (doc_label, source["page"], source["section"])
             if key not in seen:
+                if pages_per_doc.get(doc_label, 0) >= MAX_PAGES_PER_DOC:
+                    continue
                 seen.add(key)
+                pages_per_doc[doc_label] = pages_per_doc.get(doc_label, 0) + 1
                 sources.append(source)
         return sources

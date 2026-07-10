@@ -26,11 +26,12 @@ class ScoreRequest(BaseModel):
 
 class LLMScorer:
     def __init__(self):
-        # Use 70b model as judge — larger model avoids self-rating bias vs the answer model
+        # llama-3.1-8b-instant: 20,000 TPM on Groq free tier (vs 6,000 for 70b).
+        # Still a different model from the answer model so no self-rating bias.
         self.client = FallbackLLMClient(
             groq_api_key=settings.groq_api_key,
             groq_base_url=settings.groq_base_url,
-            groq_model="llama-3.3-70b-versatile",
+            groq_model="llama-3.1-8b-instant",
             ollama_base_url=settings.ollama_base_url,
             ollama_model=settings.ollama_model,
             ollama_api_key=settings.ollama_api_key,
@@ -162,6 +163,12 @@ def _query_rag(question: str, document_ids: list = None) -> dict:
             opencode_api_key=settings.opencode_api_key,
             opencode_base_url=settings.opencode_base_url,
             opencode_model=settings.opencode_model,
+            groq_api_key=settings.groq_api_key,
+            groq_base_url=settings.groq_base_url,
+            groq_model=settings.groq_model,
+            ollama_base_url=settings.ollama_base_url,
+            ollama_model=settings.ollama_model,
+            ollama_api_key=settings.ollama_api_key,
         )
         result = synthesizer.synthesize(question, context, has_documents=True)
 

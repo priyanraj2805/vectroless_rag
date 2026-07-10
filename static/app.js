@@ -175,6 +175,28 @@ function updateHeaderBadge() {
         badge.textContent = 'No documents';
         badge.className = 'badge';
     }
+
+    updateSendButtonState();
+}
+
+function updateSendButtonState() {
+    const processing = documents.filter(d => d.status === 'processing').length;
+    const sendBtn = document.getElementById('sendBtn');
+    const chatInput = document.getElementById('chatInput');
+    if (!sendBtn || !chatInput) return;
+
+    if (processing > 0) {
+        sendBtn.disabled = true;
+        sendBtn.title = 'Waiting for PDF to finish processing…';
+        chatInput.placeholder = 'Waiting for PDF to be ready…';
+    } else {
+        // Only re-enable if sendMessage didn't already disable it for a pending request
+        if (sendBtn.dataset.waiting !== 'true') {
+            sendBtn.disabled = false;
+            sendBtn.title = '';
+        }
+        chatInput.placeholder = 'Ask a question or say hi…';
+    }
 }
 
 function renderDocuments() {
@@ -342,6 +364,7 @@ async function sendMessage() {
 
     const sendBtn = document.getElementById('sendBtn');
     sendBtn.disabled = true;
+    sendBtn.dataset.waiting = 'true';
 
     const thinkingId = addMessage('assistant', '<span class="thinking">Thinking...</span>');
 
@@ -373,17 +396,23 @@ async function sendMessage() {
             html += `<div class="msg-meta">${data.entities_found} entities · ${data.chunks_used} chunks used</div>`;
         }
 
+        // Embed eval placeholder inside the bubble so scores appear in the same section
+        let reportId = null;
+        if (data.context_texts && data.context_texts.length > 0 && !data.needs_selection) {
+            reportId = 'eval-card-' + Date.now();
+            html += `<div id="${reportId}" class="eval-inline-card"><span class="eval-pending">Scoring…</span></div>`;
+        }
+
         updateMessage(thinkingId, html);
 
-        // Auto-eval in background — insert report card in chat after the answer
-        if (data.context_texts && data.context_texts.length > 0 && !data.needs_selection) {
-            const reportId = insertEvalCard(thinkingId);
+        if (reportId) {
             runAutoEval(question, data.answer, data.context_texts, data.trace_id || null, reportId);
         }
     } catch (error) {
         updateMessage(thinkingId, 'Error: ' + error.message);
     } finally {
-        sendBtn.disabled = false;
+        sendBtn.dataset.waiting = 'false';
+        updateSendButtonState();
         input.focus();
     }
 }
@@ -491,37 +520,49 @@ async function runEvaluation() {
     resultsSection.innerHTML = '';
 
     try {
-        // Score in batches of 3 with 1s delay between batches to stay under Groq TPM limit
-        const BATCH_SIZE = 3;
+        // Score one at a time with a gap to avoid Groq TPM rate limits.
+        // llama-3.1-8b-instant has 20k TPM; ~1300 tokens/request → 4s gap keeps us under.
+        // Retry once on 429 after a longer wait.
+        const INTER_REQUEST_DELAY = 4000;
         const scoreResults = [];
-        for (let i = 0; i < sessionQuestions.length; i += BATCH_SIZE) {
-            if (i > 0) await new Promise(r => setTimeout(r, 1000));
-            const batch = sessionQuestions.slice(i, i + BATCH_SIZE);
-            const batchNum = Math.floor(i / BATCH_SIZE) + 1;
-            const totalBatches = Math.ceil(sessionQuestions.length / BATCH_SIZE);
-            empty.textContent = `Scoring batch ${batchNum}/${totalBatches}…`;
-            const batchResults = await Promise.all(batch.map(async (q) => {
-                try {
-                    const ctxTexts = q.context_texts && q.context_texts.length > 0
-                        ? q.context_texts
-                        : (q.sources || []).map(s => s.content_preview).filter(Boolean);
-                    const res = await fetch('/api/eval/score', {
+        for (let i = 0; i < sessionQuestions.length; i++) {
+            if (i > 0) await new Promise(r => setTimeout(r, INTER_REQUEST_DELAY));
+            const q = sessionQuestions[i];
+            empty.textContent = `Scoring question ${i + 1}/${sessionQuestions.length}…`;
+            const ctxTexts = q.context_texts && q.context_texts.length > 0
+                ? q.context_texts
+                : (q.sources || []).map(s => s.content_preview).filter(Boolean);
+            const payload = JSON.stringify({
+                question: q.question,
+                answer: q.answer || '',
+                context_texts: ctxTexts,
+                trace_id: q.trace_id || null,
+            });
+            const fetchScore = async () => {
+                const res = await fetch('/api/eval/score', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: payload,
+                });
+                if (res.status === 429) {
+                    // Rate limited — wait 6s and retry once
+                    empty.textContent = `Rate limited, retrying question ${i + 1}…`;
+                    await new Promise(r => setTimeout(r, 6000));
+                    const retry = await fetch('/api/eval/score', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            question: q.question,
-                            answer: q.answer || '',
-                            context_texts: ctxTexts,
-                            trace_id: q.trace_id || null,
-                        }),
+                        body: payload,
                     });
-                    const data = res.ok ? await res.json() : {};
-                    return { question: q.question, answer: q.answer || '', scores: data.scores || {}, sources: q.sources || [] };
-                } catch (e) {
-                    return { question: q.question, answer: q.answer || '', scores: {}, sources: q.sources || [] };
+                    return retry.ok ? retry.json() : {};
                 }
-            }));
-            scoreResults.push(...batchResults);
+                return res.ok ? res.json() : {};
+            };
+            try {
+                const data = await fetchScore();
+                scoreResults.push({ question: q.question, answer: q.answer || '', scores: data.scores || {}, sources: q.sources || [] });
+            } catch (e) {
+                scoreResults.push({ question: q.question, answer: q.answer || '', scores: {}, sources: q.sources || [] });
+            }
         }
 
         empty.style.display = 'none';
@@ -643,7 +684,7 @@ async function runAutoEval(question, answer, contextTexts, traceId, reportId) {
         });
         if (!res.ok) {
             const el = document.getElementById(reportId);
-            if (el) el.innerHTML = `<span class="eval-inline-label">📊 Evaluation</span><span class="eval-pending">Scoring unavailable</span>`;
+            if (el) el.innerHTML = `<span class="eval-pending">Scoring unavailable</span>`;
             return;
         }
         const data = await res.json();
@@ -651,7 +692,7 @@ async function runAutoEval(question, answer, contextTexts, traceId, reportId) {
         fillEvalCard(reportId, data.scores || {});
     } catch (e) {
         const el = document.getElementById(reportId);
-        if (el) el.innerHTML = `<span class="eval-inline-label">📊 Evaluation</span><span class="eval-pending">Scoring unavailable</span>`;
+        if (el) el.innerHTML = `<span class="eval-pending">Scoring unavailable</span>`;
     }
 }
 
@@ -672,12 +713,11 @@ function fillEvalCard(reportId, scores) {
             <span class="eval-metric-val" style="color:${color(val, invert)}">${val !== null ? val + '%' : '—'}</span>
         </span>`;
     el.innerHTML = `
-        <span class="eval-inline-label">📊 Evaluation</span>
-        ${metric('Hallucination', hPct, true)}
+        ${metric('H', hPct, true)}
         <span class="eval-metric-sep">·</span>
-        ${metric('Relevance', arPct, false)}
+        ${metric('R', arPct, false)}
         <span class="eval-metric-sep">·</span>
-        ${metric('Precision', cpPct, false)}
+        ${metric('P', cpPct, false)}
     `;
     document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
 }

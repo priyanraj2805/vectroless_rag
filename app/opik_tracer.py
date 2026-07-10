@@ -16,6 +16,7 @@ if OPIK_API_KEY:
         workspace=OPIK_WORKSPACE or None,
         project_name=OPIK_PROJECT,
         use_local=False,
+        force=True,   # suppress "already configured" warning
     )
 
     def track(func):
