@@ -1,6 +1,6 @@
 # Vectorless RAG System
 
-A production-ready RAG (Retrieval-Augmented Generation) system that uses **SQLite FTS5** and **knowledge graphs** instead of vector embeddings. Upload 50+ PDFs and query them using natural language.
+A production-ready RAG (Retrieval-Augmented Generation) system that uses **SQLite FTS5** and **knowledge graphs** instead of vector embeddings. Upload 50+ documents (PDF, DOCX, XLSX, PPTX, images, text) and query them using natural language.
 
 ---
 
@@ -12,13 +12,17 @@ Traditional RAG stores float vector embeddings for every chunk and retrieves the
 
 #### Ingestion (`app/ingestion/`)
 
-When you upload a PDF, the following happens in sequence:
+When you upload a document (PDF, Word, Excel, PowerPoint, image, or text), the following happens in sequence:
 
-1. **`pdf_parser.py`** — extracts raw text per page using PyMuPDF
-2. **`chunker.py`** — splits text into sections/paragraphs. No embedding is computed — just plain text chunks stored as-is
-3. **`extractor.py`** — sends each chunk to the LLM and asks it to extract **entities** (people, orgs, concepts) and **relationships** as JSON. This is the LLM doing the "understanding" work that vector embeddings normally handle
-4. **`graph_builder.py`** — saves those entities as `nodes` and relationships as `edges` in SQLite
-5. **`pipeline.py`** — orchestrates the above, running extraction for all chunks in parallel (5 concurrent API calls)
+1. **`tika_detector.py`** — Apache Tika detects file type via magic bytes and extracts metadata (author, title, language, page count)
+2. **`document_router.py`** — Routes the MIME type to the appropriate parser
+3. **`docling_parser.py`** — IBM Docling parses the document into **structured elements**: headings, paragraphs, tables (as markdown), figures (with captions) — works for all supported formats
+4. **`chunker.py`** — Converts structured elements into context-aware chunks; tables and figures become dedicated chunks with `chunk_type` preserved
+5. **`extractor.py`** — sends text chunks to the LLM to extract **entities** (people, orgs, concepts) and **relationships** as JSON
+6. **`graph_builder.py`** — saves those entities as `nodes` and relationships as `edges` in SQLite
+7. **`pipeline.py`** — orchestrates the above, running extraction in parallel (2 concurrent workers, 10 chunks per batch)
+
+*Fallback: If Docling is unavailable, PyMuPDF handles PDF-only text extraction.*
 
 #### Storage (`app/storage/database.py`)
 
@@ -38,18 +42,20 @@ SQLite's FTS5 uses **BM25** (keyword ranking) instead of cosine similarity. Ther
 
 When you ask a question, three steps happen:
 
-1. **`planner.py`** — LLM converts your question into a structured search plan:
+1. **`query_analysis.py`** — LLM converts your question into a structured search plan:
    ```json
-   { "search_terms": ["revenue", "Acme"], "entity_types": ["metric"], "traverse_edges": ["relates_to"] }
+   { "keywords": ["revenue", "Acme"], "query_type": "factual", "search_terms": [...] }
    ```
 
-2. **`executor.py`** — the heart of vectorless retrieval:
-   - **FTS keyword search** on `nodes_fts` — finds matching entities by name
-   - **Graph traversal** — walks the `edges` table to find connected entities
-   - **FTS keyword search** on `chunks_fts` — pulls relevant text passages
-   - No embedding lookup. No cosine distance. Just SQL `MATCH` + `JOIN`
+2. **`hierarchical_retriever.py`** — the heart of vectorless retrieval:
+   - **Query expansion** via knowledge graph (1-hop traversal from matched entities)
+   - **Single global FTS5 BM25 search** across all chunks (not per-document)
+   - **Document-level scoring** (BM25 + heading match + entity density + metadata)
+   - **Dynamic document selection** (threshold-based, min/max docs)
+   - **Cross-encoder reranking** (ms-marco-MiniLM-L-6-v2)
+   - **Neighbor window expansion** (±1 chunk) for context continuity
 
-3. **`synthesizer.py`** — LLM generates a final answer from the retrieved graph context + chunks
+3. **`synthesizer.py`** — LLM generates a final answer from retrieved context with per-document citations
 
 ### Why It Works Without Vectors
 
@@ -58,18 +64,22 @@ Vectors capture semantic similarity ("car" ≈ "vehicle"). This project gets the
 - **Graph traversal** finds semantically related content by following those relationships
 - **BM25** handles keyword matching for direct term hits
 
-The trade-off: slightly slower ingestion (one LLM call per chunk) but zero dependency on an embedding model and no vector database infrastructure.
+The trade-off: slightly slower ingestion (one LLM call per chunk batch) but zero dependency on an embedding model and no vector database infrastructure.
 
 ### Vectorless File Map
 
 | File | Role |
 |---|---|
 | `app/storage/database.py` | FTS5 indexes — the vectorless retrieval index |
-| `app/query/executor.py` | Core retrieval — keyword search + graph traversal |
+| `app/query/hierarchical_retriever.py` | Core retrieval — keyword search + graph traversal + reranking |
 | `app/ingestion/extractor.py` | Builds the graph from text using LLM |
 | `app/ingestion/graph_builder.py` | Writes nodes/edges to SQLite |
-| `app/query/planner.py` | Converts question into a search plan |
+| `app/query/query_analysis.py` | Converts question into a search plan |
 | `app/query/synthesizer.py` | Generates answer from retrieved context |
+| `app/ingestion/docling_parser.py` | Structured parsing via IBM Docling (tables, figures, headings) |
+| `app/ingestion/chunker.py` | Structure-aware chunking (tables/figures as dedicated chunks) |
+| `app/ingestion/tika_detector.py` | File type detection + metadata via Apache Tika |
+| `app/ingestion/document_router.py` | Routes MIME types to appropriate parser |
 
 ---
 
@@ -78,6 +88,7 @@ The trade-off: slightly slower ingestion (one LLM call per chunk) but zero depen
 ### 1. Prerequisites
 
 - Python 3.11+
+- **Java 17+** (required for Apache Tika)
 - Groq API Key — free at [console.groq.com](https://console.groq.com/keys) (primary)
 - OpenRouter API Key — optional at [openrouter.ai](https://openrouter.ai) (fallback)
 
@@ -110,22 +121,27 @@ Open **http://localhost:8000** in your browser.
 
 ### 5. Upload & Query
 
-1. Drag & drop PDFs into the sidebar
+1. Drag & drop documents (PDF, DOCX, XLSX, PPTX, PNG, JPG, TXT, etc.) into the sidebar
 2. Wait for **Ready** status
 3. Ask questions in natural language
-4. Get answers with source citations
+4. Get answers with source citations (page numbers, sections, table/figure references)
 
 ---
 
 ## Features
 
 - **No Vector Embeddings** — Uses SQLite FTS5 full-text search + knowledge graph
-- **Automatic Provider Fallback** — Groq is primary; switches to OpenRouter automatically on rate limit or credit errors
-- **Parallel Extraction** — 5 concurrent LLM calls per PDF for faster ingestion
-- **Real-time Status** — Live processing timer per document
-- **Conversational Mode** — Handles greetings naturally
-- **Source Citations** — Every answer includes page numbers and sections
-- **Knowledge Graph** — Extracts entities and relationships from every chunk
+- **Multi-Format Support** — PDF, DOCX, XLSX, PPTX, images (PNG/JPG/TIFF), text/HTML/RTF
+- **Structured Document Parsing** — IBM Docling extracts headings, tables (markdown), figures (captions)
+- **Table & Figure Awareness** — Tables and figures become dedicated searchable chunks
+- **Automatic Provider Fallback** — Groq primary → OpenRouter fallback on rate limit/credit errors
+- **Parallel Extraction** — 2 concurrent workers, 10-chunk batches for faster ingestion
+- **Real-time Status** — Live processing timer per document (queued → processing → ready)
+- **Conversational Mode** — Handles greetings and meta-questions naturally
+- **Source Citations** — Every answer includes page numbers, sections, and chunk types
+- **Knowledge Graph** — Extracts entities and relationships from every text chunk
+- **Cross-Encoder Reranking** — ms-marco-MiniLM-L-6-v2 for precision
+- **Rich Metadata** — Author, title, language, MIME type stored per document
 
 ---
 
@@ -135,44 +151,55 @@ Open **http://localhost:8000** in your browser.
 ┌─────────────────────────────────────────────────────────────┐
 │                      INGESTION PIPELINE                      │
 └─────────────────────────────────────────────────────────────┘
-                             │
-                             ▼
-      PDF Upload → PyMuPDF Text Extraction (page-by-page)
-                             │
-                             ▼
-            Section-aware Chunking (headings, paragraphs)
-                             │
-                             ▼
-         Entity Extraction (LLM) → {entities, relationships}
-         [Groq primary → OpenRouter fallback]
-                             │
-                             ▼
-                   Knowledge Graph Builder
-                             │
-                   ┌─────────┴─────────┐
-                   ▼                   ▼
-              SQLite Tables      FTS5 Indexes
-         (docs, nodes, edges)   (chunks, entities)
+                              │
+                              ▼
+       Document Upload → Tika Detection (MIME + metadata)
+                              │
+                              ▼
+              DocumentRouter → Docling (preferred) / PyMuPDF (fallback)
+                              │
+                              ▼
+       Structured Elements: headings, paragraphs, tables, figures
+                              │
+                              ▼
+         TextChunker → chunks (text | table | figure) + section + page
+                              │
+                              ▼
+              BM25 Index (chunks_fts) — searchable immediately
+                              │
+                              ▼
+          Entity Extraction (LLM) → {entities, relationships}
+          [Groq primary → OpenRouter fallback]
+                              │
+                              ▼
+                    Knowledge Graph Builder
+                              │
+                    ┌─────────┴─────────┐
+                    ▼                   ▼
+               SQLite Tables      FTS5 Indexes
+          (docs, nodes, edges)   (chunks, entities)
+```
 
+```
 ┌─────────────────────────────────────────────────────────────┐
 │                       QUERY PIPELINE                         │
 └─────────────────────────────────────────────────────────────┘
-                             │
-                             ▼
-          User Question → Conversational Detection
-                             │
-                   ┌─────────┴─────────┐
-                   ▼                   ▼
-           Conversational          Query Planner (LLM)
-           Response Only           {search_terms, entity_types}
-                                         │
-                                         ▼
-                                  Query Executor
-                                  (FTS5 + Graph Traversal)
-                                         │
-                                         ▼
-                                Answer Synthesizer (LLM)
-                                {answer, sources}
+                              │
+                              ▼
+           User Question → Conversational Detection
+                              │
+                    ┌─────────┴─────────┐
+                    ▼                   ▼
+            Conversational          Query Analysis (LLM)
+            Response Only           {keywords, query_type, search_terms}
+                                          │
+                                          ▼
+                                   Hierarchical Retriever
+                                   (FTS5 + Graph + Rerank)
+                                          │
+                                          ▼
+                                 Answer Synthesizer (LLM)
+                                 {answer, sources, citations}
 ```
 
 ---
@@ -200,10 +227,13 @@ If Groq hits a rate limit (429) or OpenRouter hits a credit error (402), the cli
 | **Backend** | FastAPI | Async web framework + background tasks |
 | **Database** | SQLite (WAL mode) | Document storage + knowledge graph |
 | **Search** | FTS5 (Full-Text Search) | Fast text retrieval — no vectors needed |
-| **LLM** | Groq + OpenRouter (fallback) | Entity extraction, query planning, synthesis |
-| **PDF** | PyMuPDF (`fitz`) | Text extraction with page metadata |
+| **LLM** | Groq + OpenRouter (fallback) | Entity extraction, query analysis, synthesis |
+| **Document Parsing** | IBM Docling | Structured parsing (headings, tables, figures) |
+| **File Detection** | Apache Tika | Magic-byte MIME detection + metadata |
+| **PDF Fallback** | PyMuPDF (`fitz`) | Text extraction when Docling unavailable |
+| **Reranking** | sentence-transformers | Cross-encoder (ms-marco-MiniLM-L-6-v2) |
 | **Frontend** | Vanilla JS + CSS | Single-page app with real-time updates |
-| **Parallelization** | ThreadPoolExecutor | Concurrent chunk extraction per PDF |
+| **Parallelization** | ThreadPoolExecutor | Concurrent chunk extraction per document |
 
 ---
 
@@ -214,17 +244,22 @@ vectorless_rag/
 ├── app/
 │   ├── api/
 │   │   ├── chat.py          # Chat endpoint (question → answer)
-│   │   └── upload.py        # PDF upload + background processing
+│   │   ├── upload.py        # Multi-format upload + background processing
+│   │   └── eval.py          # Evaluation endpoints
 │   ├── ingestion/
-│   │   ├── pdf_parser.py    # PyMuPDF text extraction
-│   │   ├── chunker.py       # Section-aware text chunking
+│   │   ├── pdf_parser.py    # PyMuPDF text extraction (fallback)
+│   │   ├── chunker.py       # Structure-aware chunking (text/table/figure)
 │   │   ├── extractor.py     # Entity extraction (LLM)
 │   │   ├── graph_builder.py # Knowledge graph construction
-│   │   └── pipeline.py      # Orchestrates ingestion with parallel extraction
+│   │   ├── pipeline.py      # Orchestrates ingestion with parallel extraction
+│   │   ├── docling_parser.py       # IBM Docling structured parsing
+│   │   ├── document_router.py      # MIME type → parser routing
+│   │   └── tika_detector.py        # Apache Tika file detection + metadata
 │   ├── query/
-│   │   ├── planner.py       # Question → search plan (LLM)
-│   │   ├── executor.py      # FTS5 search + graph traversal
-│   │   └── synthesizer.py   # Context → answer (LLM)
+│   │   ├── query_analysis.py       # Question → search plan (LLM)
+│   │   ├── hierarchical_retriever.py # FTS5 + Graph + Rerank
+│   │   ├── reranker.py             # Cross-encoder reranking
+│   │   └── synthesizer.py          # Context → answer (LLM)
 │   ├── storage/
 │   │   └── database.py      # SQLite schema + FTS5 indexes + CRUD
 │   ├── llm_client.py        # FallbackLLMClient (Groq → OpenRouter)
@@ -236,7 +271,7 @@ vectorless_rag/
 │   └── app.js               # Frontend logic (upload, chat, polling)
 ├── tests/                   # Unit tests
 ├── data/                    # SQLite database (auto-created)
-├── uploads/                 # Uploaded PDFs (auto-created)
+├── uploads/                 # Uploaded documents (auto-created)
 ├── .env                     # API keys (you create this)
 ├── requirements.txt         # Python dependencies
 └── README.md                # This file
@@ -253,7 +288,12 @@ CREATE TABLE documents (
     page_count INTEGER,
     upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     completed_at TIMESTAMP,
-    status TEXT DEFAULT 'processing'  -- 'processing', 'ready', 'error'
+    status TEXT DEFAULT 'processing',  -- 'queued', 'processing', 'ready', 'error'
+    mime_type TEXT,                    -- e.g., 'application/pdf'
+    content_type TEXT,                 -- 'pdf', 'docx', 'xlsx', 'pptx', 'image', 'text'
+    author TEXT,
+    document_title TEXT,
+    language TEXT
 );
 
 CREATE TABLE nodes (
@@ -277,7 +317,10 @@ CREATE TABLE chunks (
     document_id INTEGER NOT NULL,
     content TEXT NOT NULL,
     page_number INTEGER,
-    section_title TEXT
+    section_title TEXT,
+    chunk_index INTEGER,
+    chunk_type TEXT DEFAULT 'text',  -- 'text', 'table', 'figure'
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Vectorless retrieval indexes (replaces vector store)
@@ -289,12 +332,24 @@ CREATE VIRTUAL TABLE nodes_fts  USING fts5(name, attributes);
 
 ## API Reference
 
-### Upload PDFs
+### Upload Documents
 ```http
 POST /api/upload
 Content-Type: multipart/form-data
 
-files: [file1.pdf, file2.pdf, ...]
+files: [file1.pdf, file2.docx, file3.xlsx, ...]
+```
+
+**Supported extensions:** `.pdf`, `.docx`, `.doc`, `.xlsx`, `.xls`, `.pptx`, `.ppt`, `.png`, `.jpg`, `.jpeg`, `.tiff`, `.bmp`, `.webp`, `.txt`, `.html`, `.rtf`
+
+**Response:**
+```json
+{
+  "documents": [
+    {"filename": "report.pdf", "status": "queued", "doc_id": 1},
+    {"filename": "data.xlsx", "status": "queued", "doc_id": 2}
+  ]
+}
 ```
 
 ### List Documents
@@ -302,21 +357,32 @@ files: [file1.pdf, file2.pdf, ...]
 GET /api/documents
 ```
 
+**Response:**
+```json
+{
+  "documents": [
+    {"id": 1, "filename": "report.pdf", "page_count": 12, "upload_date": "...", "status": "ready", "completed_at": "..."}
+  ]
+}
+```
+
 ### Ask a Question
 ```http
 POST /api/chat
 Content-Type: application/json
 
-{ "question": "What are the key findings?" }
+{ "question": "What are the key findings?", "document_ids": [1, 2] }
 ```
 
 **Response:**
 ```json
 {
   "answer": "The key findings are...",
-  "sources": [{"page": 5, "section": "Executive Summary"}],
+  "sources": [{"document": "Document 1 — report.pdf", "content_preview": "...", "page": 5, "section": "Executive Summary"}],
   "entities_found": 8,
-  "chunks_used": 5
+  "chunks_used": 5,
+  "trace_id": "abc123",
+  "context_texts": ["..."]
 }
 ```
 
@@ -330,6 +396,21 @@ DELETE /api/documents/{id}
 GET /api/graph/stats
 ```
 
+### Evaluation
+```http
+POST /api/eval/run
+Content-Type: application/json
+
+{ "questions": ["What is X?", "Compare Y and Z"] }
+```
+
+```http
+POST /api/eval/score
+Content-Type: application/json
+
+{ "question": "...", "answer": "...", "context_texts": ["..."], "trace_id": "..." }
+```
+
 ---
 
 ## Configuration
@@ -340,7 +421,8 @@ GET /api/graph/stats
 GROQ_API_KEY=gsk_...           # Primary LLM provider (free)
 OPENROUTER_API_KEY=sk-or-v1-.. # Fallback LLM provider (optional)
 DATABASE_PATH=./data/graph.db  # Database location
-UPLOAD_DIR=./uploads           # PDF storage directory
+UPLOAD_DIR=./uploads           # Document storage directory
+REDIS_URL=redis://localhost:6379  # Optional: for answer caching
 ```
 
 ---
@@ -360,15 +442,25 @@ UPLOAD_DIR=./uploads           # PDF storage directory
 - The system automatically falls back to OpenRouter if configured
 - Or reduce parallel workers in `app/ingestion/pipeline.py`: `max_workers=2`
 
+### "Docling not available"
+- Install Docling: `pip install docling`
+- Requires Python 3.9+ and system dependencies (see Docling docs)
+
+### "Tika not available"
+- Install Java 17+: `apt-get install openjdk-17-jre` (Linux) or download from Oracle/Adoptium
+- Install Tika Python client: `pip install tika`
+- Fallback: extension-based detection works without Tika (no metadata extraction)
+
 ### Database locked / corrupted
 ```bash
 del data\graph.db data\graph.db-wal data\graph.db-shm
 ```
 Restart the server — database rebuilds automatically.
 
-### Processing stuck at "Processing..."
+### Processing stuck at "Processing..." or "Queued"
 - Background task crashed or LLM API error
 - Check server logs, then restart the server
+- Documents stuck in "queued" → processing starts when background worker picks them up
 
 ---
 
@@ -386,6 +478,8 @@ pytest tests/ -v
 # Production run with Gunicorn
 gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
 ```
+
+Ensure Java 17+ is installed on the deployment target for Tika.
 
 ---
 

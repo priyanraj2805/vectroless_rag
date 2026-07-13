@@ -11,3 +11,5 @@ pydantic-settings==2.5.0
 redis>=5.0.0
 sentence-transformers>=2.7.0
 numpy>=1.26.0
+tika>=2.6.0
+docling>=2.0.0

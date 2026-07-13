@@ -15,8 +15,16 @@ def get_db():
     return Database(settings.database_path)
 
 
-def process_pdf_background(pdf_path: str, groq_api_key: str, groq_base_url: str, groq_model: str,
-                           ollama_base_url: str, ollama_model: str, ollama_api_key: str, redis_url: str):
+SUPPORTED_EXTENSIONS = {
+    ".pdf", ".docx", ".doc", ".xlsx", ".xls",
+    ".pptx", ".ppt", ".png", ".jpg", ".jpeg",
+    ".tiff", ".bmp", ".webp", ".txt", ".html", ".rtf",
+}
+
+
+def process_document_background(file_path: str, doc_id: int, groq_api_key: str, groq_base_url: str,
+                                 groq_model: str, ollama_base_url: str, ollama_model: str,
+                                 ollama_api_key: str, redis_url: str):
     db = Database(settings.database_path)
     try:
         pipeline = IngestionPipeline(
@@ -25,36 +33,54 @@ def process_pdf_background(pdf_path: str, groq_api_key: str, groq_base_url: str,
             ollama_base_url=ollama_base_url, ollama_model=ollama_model, ollama_api_key=ollama_api_key,
             redis_url=redis_url,
         )
-        pipeline.ingest(pdf_path)
-        # Bump version after ingestion completes — invalidates all answer/plan caches
+        pipeline.ingest(file_path, doc_id=doc_id)
         from app.cache import get_redis, bump_version
         r = get_redis(redis_url)
         bump_version(r)
+    except Exception as e:
+        print(f"[upload] processing failed for {file_path}: {e}")
+        # pipeline.ingest already marks status='error'; this is a safety net
+        try:
+            db.update_document_status(doc_id, "error")
+        except Exception:
+            pass
     finally:
         db.close()
 
 
 @router.post("/upload")
-async def upload_pdfs(files: List[UploadFile] = File(...), background_tasks: BackgroundTasks = None):
+async def upload_documents(files: List[UploadFile] = File(...), background_tasks: BackgroundTasks = None):
     results = []
+    db = get_db()
 
-    for file in files:
-        if not file.filename.endswith(".pdf"):
-            results.append({"filename": file.filename, "status": "error", "message": "Not a PDF"})
-            continue
+    try:
+        for file in files:
+            ext = os.path.splitext(file.filename or "")[1].lower()
+            if ext not in SUPPORTED_EXTENSIONS:
+                results.append({
+                    "filename": file.filename,
+                    "status": "error",
+                    "message": f"Unsupported file type '{ext}'. Supported: PDF, DOCX, XLSX, PPTX, PNG, JPG, TXT and more.",
+                })
+                continue
 
-        save_path = os.path.join(settings.upload_dir, file.filename)
-        with open(save_path, "wb") as f:
-            content = await file.read()
-            f.write(content)
+            save_path = os.path.join(settings.upload_dir, file.filename)
+            with open(save_path, "wb") as f:
+                content = await file.read()
+                f.write(content)
 
-        executor.submit(
-            process_pdf_background, save_path,
-            settings.groq_api_key, settings.groq_base_url, settings.groq_model,
-            settings.ollama_base_url, settings.ollama_model, settings.ollama_api_key,
-            settings.redis_url,
-        )
-        results.append({"filename": file.filename, "status": "processing"})
+            # Pre-insert as 'queued' — user sees the document in the sidebar immediately
+            doc_id = db.insert_document(filename=file.filename, status='queued')
+
+            executor.submit(
+                process_document_background, save_path, doc_id,
+                settings.groq_api_key, settings.groq_base_url, settings.groq_model,
+                settings.ollama_base_url, settings.ollama_model, settings.ollama_api_key,
+                settings.redis_url,
+            )
+            results.append({"filename": file.filename, "status": "queued", "doc_id": doc_id})
+    finally:
+        db.close()
 
     return {"documents": results}
 

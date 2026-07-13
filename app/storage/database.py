@@ -88,10 +88,22 @@ class Database:
         docs_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(documents)").fetchall()}
         if "completed_at" not in docs_cols:
             self.conn.execute("ALTER TABLE documents ADD COLUMN completed_at TIMESTAMP")
+        if "mime_type" not in docs_cols:
+            self.conn.execute("ALTER TABLE documents ADD COLUMN mime_type TEXT")
+        if "content_type" not in docs_cols:
+            self.conn.execute("ALTER TABLE documents ADD COLUMN content_type TEXT")
+        if "author" not in docs_cols:
+            self.conn.execute("ALTER TABLE documents ADD COLUMN author TEXT")
+        if "document_title" not in docs_cols:
+            self.conn.execute("ALTER TABLE documents ADD COLUMN document_title TEXT")
+        if "language" not in docs_cols:
+            self.conn.execute("ALTER TABLE documents ADD COLUMN language TEXT")
 
         chunk_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(chunks)").fetchall()}
         if "chunk_index" not in chunk_cols:
             self.conn.execute("ALTER TABLE chunks ADD COLUMN chunk_index INTEGER")
+        if "chunk_type" not in chunk_cols:
+            self.conn.execute("ALTER TABLE chunks ADD COLUMN chunk_type TEXT DEFAULT 'text'")
 
         # Rebuild FTS indexes to fix any sync issues from previous failed writes
         try:
@@ -116,10 +128,13 @@ class Database:
     def close(self):
         self.conn.close()
 
-    def insert_document(self, filename: str, page_count: int = 0) -> int:
+    def insert_document(self, filename: str, page_count: int = 0,
+                        mime_type: str = None, content_type: str = None,
+                        author: str = None, document_title: str = None,
+                        language: str = None, status: str = 'processing') -> int:
         cursor = self.execute(
-            "INSERT INTO documents (filename, page_count) VALUES (?, ?)",
-            (filename, page_count),
+            "INSERT INTO documents (filename, page_count, mime_type, content_type, author, document_title, language, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (filename, page_count, mime_type, content_type, author, document_title, language, status),
         )
         self.commit()
         return cursor.lastrowid
@@ -140,10 +155,12 @@ class Database:
         self.commit()
         return cursor.lastrowid
 
-    def insert_chunk(self, document_id: int, content: str, page_number: int = None, section_title: str = None, chunk_index: int = None, auto_commit: bool = True) -> int:
+    def insert_chunk(self, document_id: int, content: str, page_number: int = None,
+                     section_title: str = None, chunk_index: int = None,
+                     chunk_type: str = "text", auto_commit: bool = True) -> int:
         cursor = self.execute(
-            "INSERT INTO chunks (document_id, content, page_number, section_title, chunk_index) VALUES (?, ?, ?, ?, ?)",
-            (document_id, content, page_number, section_title, chunk_index),
+            "INSERT INTO chunks (document_id, content, page_number, section_title, chunk_index, chunk_type) VALUES (?, ?, ?, ?, ?, ?)",
+            (document_id, content, page_number, section_title, chunk_index, chunk_type),
         )
         if auto_commit:
             self.commit()

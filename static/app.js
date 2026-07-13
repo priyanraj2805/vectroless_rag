@@ -28,22 +28,91 @@ document.addEventListener('DOMContentLoaded', () => {
     loadStats();
 });
 
+const SUPPORTED_EXTENSIONS = new Set([
+    '.pdf', '.docx', '.doc', '.xlsx', '.xls',
+    '.pptx', '.ppt', '.png', '.jpg', '.jpeg',
+    '.tiff', '.bmp', '.webp', '.txt', '.html', '.htm', '.rtf',
+]);
+
+function getExt(filename) {
+    const i = filename.lastIndexOf('.');
+    return i >= 0 ? filename.slice(i).toLowerCase() : '';
+}
+
+function uploadWithProgress(formData, onProgress) {
+    return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.upload.addEventListener('progress', (e) => {
+            if (e.lengthComputable) onProgress(e.loaded, e.total);
+        });
+        xhr.addEventListener('load', () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+                try { resolve(JSON.parse(xhr.responseText)); }
+                catch (e) { reject(new Error('Invalid server response')); }
+            } else {
+                reject(new Error(`Server error ${xhr.status}`));
+            }
+        });
+        xhr.addEventListener('error', () => reject(new Error('Network error')));
+        xhr.open('POST', '/api/upload');
+        xhr.send(formData);
+    });
+}
+
+function showUploadProgress(pct, fileCount) {
+    const dropzone = document.getElementById('dropzone');
+    dropzone.classList.add('uploading');
+    dropzone.innerHTML = `
+        <div class="drop-icon">📤</div>
+        <p>Uploading ${fileCount} file${fileCount > 1 ? 's' : ''}…</p>
+        <div class="upload-progress-track">
+            <div class="upload-progress-fill" style="width:${pct}%"></div>
+        </div>
+        <p class="hint">${pct}%</p>`;
+}
+
+function resetDropzone() {
+    const dropzone = document.getElementById('dropzone');
+    dropzone.classList.remove('uploading');
+    dropzone.innerHTML = `
+        <div class="drop-icon">📁</div>
+        <p>Drop files here or click to upload</p>
+        <p class="hint">PDF · DOCX · XLSX · PPTX · PNG · JPG · TXT</p>`;
+}
+
 async function handleFiles(files) {
-    const pdfs = Array.from(files).filter(f => f.name.toLowerCase().endsWith('.pdf'));
-    if (!pdfs.length) { showToast('Please upload PDF files only.', 'error'); return; }
+    const all = Array.from(files);
+    const supported = all.filter(f => SUPPORTED_EXTENSIONS.has(getExt(f.name)));
+    const rejected  = all.filter(f => !SUPPORTED_EXTENSIONS.has(getExt(f.name)));
+
+    if (rejected.length) {
+        const names = rejected.map(f => f.name).join(', ');
+        showToast(`Skipped unsupported file(s): ${names}`, 'error');
+    }
+    if (!supported.length) return;
 
     const formData = new FormData();
-    pdfs.forEach(f => formData.append('files', f));
-
-    showToast(`Uploading ${pdfs.length} PDF(s)...`, 'info');
+    supported.forEach(f => formData.append('files', f));
+    const count = supported.length;
+    showUploadProgress(0, count);
 
     try {
-        const response = await fetch('/api/upload', { method: 'POST', body: formData });
-        const data = await response.json();
+        const data = await uploadWithProgress(formData, (loaded, total) => {
+            showUploadProgress(Math.round((loaded / total) * 100), count);
+        });
+
+        (data.documents || []).forEach(d => {
+            if (d.status === 'error') showToast(`${d.filename}: ${d.message}`, 'error');
+        });
+
+        const label = count === 1 ? supported[0].name : `${count} files`;
+        showToast(`Uploaded ${label} — processing started`, 'success');
         loadDocuments();
         startPolling();
     } catch (error) {
         showToast('Upload failed: ' + error.message, 'error');
+    } finally {
+        resetDropzone();
     }
 }
 
@@ -53,21 +122,31 @@ function startPolling() {
         const oldStatuses = { ...prevStatuses };
         await loadDocuments();
 
-        documents.forEach(doc => {
-            if (oldStatuses[doc.id] === 'processing' && doc.status === 'ready') {
-                showToast(`"${doc.filename.split('.')[0]}" is ready — ask questions!`, 'success');
-            }
-            if (oldStatuses[doc.id] === 'processing' && doc.status === 'error') {
-                showToast(`Failed to process "${doc.filename}"`, 'error');
-            }
-        });
+        const total = documents.length;
+        const inProgress = documents.some(d => d.status === 'processing' || d.status === 'queued');
 
-        const hasProcessing = documents.some(d => d.status === 'processing');
-        if (!hasProcessing) {
+        // Individual toasts only for small batches — avoid toast flood for 100+ docs
+        if (total <= 5) {
+            documents.forEach(doc => {
+                const was = oldStatuses[doc.id];
+                if ((was === 'processing' || was === 'queued') && doc.status === 'ready') {
+                    showToast(`"${doc.filename.split('.')[0]}" is ready!`, 'success');
+                }
+                if ((was === 'processing' || was === 'queued') && doc.status === 'error') {
+                    showToast(`Failed to process "${doc.filename}"`, 'error');
+                }
+            });
+        }
+
+        if (!inProgress) {
             clearInterval(pollInterval);
             pollInterval = null;
             stopLiveTimer();
             loadStats();
+            if (total > 5) {
+                const readyCount = documents.filter(d => d.status === 'ready').length;
+                showToast(`All done — ${readyCount} of ${total} documents ready`, readyCount === total ? 'success' : 'info');
+            }
         }
     }, 3000);
 }
@@ -103,7 +182,7 @@ async function loadDocuments() {
         updateHeaderBadge();
         updatePdfStats();
 
-        if (documents.some(d => d.status === 'processing')) {
+        if (documents.some(d => d.status === 'processing' || d.status === 'queued')) {
             startLiveTimer();
         } else {
             stopLiveTimer();
@@ -155,6 +234,7 @@ function updatePdfStats() {
 function updateHeaderBadge() {
     const ready = documents.filter(d => d.status === 'ready').length;
     const processing = documents.filter(d => d.status === 'processing').length;
+    const queued = documents.filter(d => d.status === 'queued').length;
     const errors = documents.filter(d => d.status === 'error').length;
     const badge = document.getElementById('headerBadge');
     const summary = document.getElementById('docSummary');
@@ -162,11 +242,13 @@ function updateHeaderBadge() {
     const parts = [];
     if (ready) parts.push(`${ready} ready`);
     if (processing) parts.push(`${processing} processing`);
+    if (queued) parts.push(`${queued} queued`);
     if (errors) parts.push(`${errors} failed`);
     summary.textContent = parts.length ? parts.join(' · ') : 'No documents yet';
 
-    if (processing > 0) {
-        badge.textContent = `${processing} processing...`;
+    const inProgress = processing + queued;
+    if (inProgress > 0) {
+        badge.textContent = inProgress > 1 ? `${inProgress} in progress…` : (processing ? 'processing…' : 'queued…');
         badge.className = 'badge processing';
     } else if (ready > 0) {
         badge.textContent = `${ready} doc${ready > 1 ? 's' : ''} ready`;
@@ -180,17 +262,16 @@ function updateHeaderBadge() {
 }
 
 function updateSendButtonState() {
-    const processing = documents.filter(d => d.status === 'processing').length;
+    const inProgress = documents.filter(d => d.status === 'processing' || d.status === 'queued').length;
     const sendBtn = document.getElementById('sendBtn');
     const chatInput = document.getElementById('chatInput');
     if (!sendBtn || !chatInput) return;
 
-    if (processing > 0) {
+    if (inProgress > 0) {
         sendBtn.disabled = true;
-        sendBtn.title = 'Waiting for PDF to finish processing…';
-        chatInput.placeholder = 'Waiting for PDF to be ready…';
+        sendBtn.title = 'Waiting for documents to finish processing…';
+        chatInput.placeholder = 'Waiting for documents to be ready…';
     } else {
-        // Only re-enable if sendMessage didn't already disable it for a pending request
         if (sendBtn.dataset.waiting !== 'true') {
             sendBtn.disabled = false;
             sendBtn.title = '';
@@ -199,71 +280,149 @@ function updateSendButtonState() {
     }
 }
 
+function renderDocItem(doc, now) {
+    const statusIcon  = { ready: '✓', processing: '⟳', error: '✗', queued: '⏳' };
+    const statusLabel = { ready: 'Ready', processing: 'Processing...', error: 'Failed', queued: 'Queued' };
+    const isSelected = selectedDocumentIds.includes(doc.id);
+    const pages = doc.page_count ? ` · ${doc.page_count}p` : '';
+
+    let timeHtml = '';
+    if (doc.status === 'processing') {
+        const start = parseSQLiteDate(doc.upload_date);
+        const startMs = start ? start.getTime() : now;
+        timeHtml = `<span class="time-label" data-start="${startMs}">${formatDuration((now - startMs) / 1000)}</span>`;
+    } else if (doc.status === 'ready' && doc.completed_at) {
+        const start = parseSQLiteDate(doc.upload_date);
+        const end = parseSQLiteDate(doc.completed_at);
+        if (start && end) timeHtml = `<span class="time-label done">in ${formatDuration((end - start) / 1000)}</span>`;
+    } else if (doc.status === 'error' && doc.completed_at) {
+        const start = parseSQLiteDate(doc.upload_date);
+        const end = parseSQLiteDate(doc.completed_at);
+        if (start && end) timeHtml = `<span class="time-label err">after ${formatDuration((end - start) / 1000)}</span>`;
+    }
+
+    const selectedClass = isSelected ? ' selected' : '';
+    const checkboxHtml = doc.status === 'ready'
+        ? `<input type="checkbox" class="doc-checkbox" ${isSelected ? 'checked' : ''} onchange="toggleDocument(${doc.id}, this.checked)" onclick="event.stopPropagation()">`
+        : `<input type="checkbox" class="doc-checkbox" disabled>`;
+
+    return `<div class="file-item ${doc.status}${selectedClass}">
+        ${checkboxHtml}
+        <span class="status-icon">${statusIcon[doc.status] || '?'}</span>
+        <div class="file-info">
+            <span class="name" title="${escapeHtml(doc.filename)}">${escapeHtml(doc.filename)}</span>
+            <span class="status-label">${statusLabel[doc.status] || doc.status}${pages}${timeHtml ? ' · ' : ''}${timeHtml}</span>
+        </div>
+        <span class="delete" onclick="deleteDocument(${doc.id}, event)" title="Delete">&times;</span>
+    </div>`;
+}
+
+function toggleGroup(listId, toggleId) {
+    const list = document.getElementById(listId);
+    const toggle = document.getElementById(toggleId);
+    if (!list) return;
+    const open = list.style.display === 'none';
+    list.style.display = open ? 'block' : 'none';
+    if (toggle) toggle.textContent = open ? '▾' : '▸';
+}
+
+function updateBatchProgress() {
+    const bp = document.getElementById('batchProgress');
+    if (!bp) return;
+    const total = documents.length;
+    const readyCount = documents.filter(d => d.status === 'ready').length;
+    const processingCount = documents.filter(d => d.status === 'processing').length;
+    const queuedCount = documents.filter(d => d.status === 'queued').length;
+    const errorCount = documents.filter(d => d.status === 'error').length;
+
+    if (processingCount === 0 && queuedCount === 0) { bp.style.display = 'none'; return; }
+
+    bp.style.display = 'block';
+    const pct = total > 0 ? Math.round((readyCount / total) * 100) : 0;
+
+    const parts = [];
+    if (readyCount > 0) parts.push(`<span class="bc-ready">✓ ${readyCount}</span>`);
+    if (processingCount > 0) parts.push(`<span class="bc-processing">⟳ ${processingCount} active</span>`);
+    if (queuedCount > 0) parts.push(`<span class="bc-queued">⏳ ${queuedCount} queued</span>`);
+    if (errorCount > 0) parts.push(`<span class="bc-error">✗ ${errorCount} failed</span>`);
+
+    document.getElementById('batchCounts').innerHTML = parts.join('<span class="bc-sep"> · </span>');
+    document.getElementById('batchBarFill').style.width = pct + '%';
+    document.getElementById('batchBarText').textContent = `${readyCount} of ${total} ready`;
+}
+
 function renderDocuments() {
     const list = document.getElementById('fileList');
     if (!documents.length) {
-        list.innerHTML = '<div class="empty-docs">Upload PDFs to get started</div>';
+        list.innerHTML = '<div class="empty-docs">Upload documents to get started</div>';
+        updateBatchProgress();
         return;
     }
 
-    const statusIcon = { ready: '✓', processing: '⟳', error: '✗' };
-    const statusLabel = { ready: 'Ready', processing: 'Processing...', error: 'Failed' };
     const now = Date.now();
+    const ready      = documents.filter(d => d.status === 'ready');
+    const processing = documents.filter(d => d.status === 'processing');
+    const queued     = documents.filter(d => d.status === 'queued');
+    const errors     = documents.filter(d => d.status === 'error');
+    const hasInProgress = processing.length + queued.length > 0;
 
     let html = '';
 
-    const readyDocs = documents.filter(d => d.status === 'ready');
-    const allSelected = readyDocs.length > 0 && readyDocs.every(d => selectedDocumentIds.includes(d.id));
-
-    if (readyDocs.length > 1) {
+    // Select-all button for ready docs
+    if (ready.length > 1) {
+        const allSelected = ready.every(d => selectedDocumentIds.includes(d.id));
         html += `<div class="all-docs-btn select-all-btn" onclick="toggleSelectAll()">
-            ${allSelected ? '☐ Deselect all' : `☑ Select all (${readyDocs.length})`}
+            ${allSelected ? '☐ Deselect all' : `☑ Select all (${ready.length})`}
         </div>`;
     }
 
-    html += documents.map(doc => {
-        const pages = doc.page_count ? ` · ${doc.page_count}p` : '';
-        let timeHtml = '';
-        const isSelected = selectedDocumentIds.includes(doc.id);
+    // Errors and active processing — always shown individually
+    errors.forEach(doc => { html += renderDocItem(doc, now); });
+    processing.forEach(doc => { html += renderDocItem(doc, now); });
 
-        if (doc.status === 'processing') {
-            const start = parseSQLiteDate(doc.upload_date);
-            const startMs = start ? start.getTime() : now;
-            const elapsed = formatDuration((now - startMs) / 1000);
-            timeHtml = `<span class="time-label" data-start="${startMs}">${elapsed}</span>`;
-        } else if (doc.status === 'ready' && doc.completed_at) {
-            const start = parseSQLiteDate(doc.upload_date);
-            const end = parseSQLiteDate(doc.completed_at);
-            if (start && end) {
-                timeHtml = `<span class="time-label done">in ${formatDuration((end - start) / 1000)}</span>`;
-            }
-        } else if (doc.status === 'error' && doc.completed_at) {
-            const start = parseSQLiteDate(doc.upload_date);
-            const end = parseSQLiteDate(doc.completed_at);
-            if (start && end) {
-                timeHtml = `<span class="time-label err">after ${formatDuration((end - start) / 1000)}</span>`;
+    // Queued — individual if ≤3, collapsed group otherwise
+    if (queued.length > 0 && queued.length <= 3) {
+        queued.forEach(doc => { html += renderDocItem(doc, now); });
+    } else if (queued.length > 3) {
+        html += `<div class="docs-group">
+            <div class="docs-group-header" onclick="toggleGroup('queued-group-list','queued-toggle')">
+                <span class="docs-group-icon">⏳</span>
+                <span>${queued.length} queued</span>
+                <span class="docs-group-toggle" id="queued-toggle">▸</span>
+            </div>
+            <div id="queued-group-list" class="docs-group-body" style="display:none">
+                ${queued.map(doc => renderDocItem(doc, now)).join('')}
+            </div>
+        </div>`;
+    }
+
+    // Ready — show all when not busy; collapse excess when processing is still ongoing
+    const COLLAPSE_AT = 6;
+    const SHOW_FIRST  = 2;
+    if (ready.length > 0) {
+        if (!hasInProgress || ready.length <= COLLAPSE_AT) {
+            ready.forEach(doc => { html += renderDocItem(doc, now); });
+        } else {
+            ready.slice(0, SHOW_FIRST).forEach(doc => { html += renderDocItem(doc, now); });
+            const rest = ready.slice(SHOW_FIRST);
+            if (rest.length > 0) {
+                html += `<div class="docs-group">
+                    <div class="docs-group-header" onclick="toggleGroup('ready-group-list','ready-toggle')">
+                        <span class="docs-group-icon" style="color:#2e7d32">✓</span>
+                        <span>${rest.length} more ready</span>
+                        <span class="docs-group-toggle" id="ready-toggle">▸</span>
+                    </div>
+                    <div id="ready-group-list" class="docs-group-body" style="display:none">
+                        ${rest.map(doc => renderDocItem(doc, now)).join('')}
+                    </div>
+                </div>`;
             }
         }
-
-        const selectedClass = isSelected ? ' selected' : '';
-        const checkboxHtml = doc.status === 'ready'
-            ? `<input type="checkbox" class="doc-checkbox" ${isSelected ? 'checked' : ''} onchange="toggleDocument(${doc.id}, this.checked)" onclick="event.stopPropagation()">`
-            : `<input type="checkbox" class="doc-checkbox" disabled>`;
-
-        return `
-        <div class="file-item ${doc.status}${selectedClass}">
-            ${checkboxHtml}
-            <span class="status-icon">${statusIcon[doc.status] || '?'}</span>
-            <div class="file-info">
-                <span class="name" title="${escapeHtml(doc.filename)}">${escapeHtml(doc.filename)}</span>
-                <span class="status-label">${statusLabel[doc.status] || doc.status}${pages}${timeHtml ? ' · ' : ''}${timeHtml}</span>
-            </div>
-            <span class="delete" onclick="deleteDocument(${doc.id}, event)" title="Delete">&times;</span>
-        </div>`;
-    }).join('');
+    }
 
     list.innerHTML = html;
     updateChatContext();
+    updateBatchProgress();
 }
 
 function toggleDocument(id, checked) {

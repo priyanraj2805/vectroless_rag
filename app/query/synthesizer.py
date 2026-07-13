@@ -21,7 +21,7 @@ Answer:"""
 
 NO_DOCUMENTS_PROMPT = """The user asked: {question}
 
-No documents have been uploaded yet. Respond by letting them know they need to upload PDF documents first before you can answer questions."""
+No documents have been uploaded yet. Respond by letting them know they need to upload documents first (PDF, DOCX, XLSX, images, etc.) before you can answer questions."""
 
 
 class AnswerSynthesizer:

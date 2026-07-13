@@ -18,7 +18,7 @@
             <div class="pdf-stats" id="pdfStats">
                 <div class="pdf-stat-item">
                     <span class="pdf-stat-number" id="totalPdfs">—</span>
-                    <span class="pdf-stat-label">Total PDFs</span>
+                    <span class="pdf-stat-label">Total Docs</span>
                 </div>
                 <div class="pdf-stat-divider"></div>
                 <div class="pdf-stat-item">
@@ -28,14 +28,19 @@
             </div>
             <div class="upload-area">
                 <div class="dropzone" id="dropzone">
-                    <div class="drop-icon">📄</div>
-                    <p>Drop PDFs here or click to upload</p>
-                    <p class="hint">Supports batch upload (50+ PDFs)</p>
+                    <div class="drop-icon">📁</div>
+                    <p>Drop files here or click to upload</p>
+                    <p class="hint">PDF · DOCX · XLSX · PPTX · PNG · JPG · TXT</p>
                 </div>
-                <input type="file" id="fileInput" multiple accept=".pdf" hidden>
+                <input type="file" id="fileInput" multiple accept=".pdf,.docx,.doc,.xlsx,.xls,.pptx,.ppt,.png,.jpg,.jpeg,.tiff,.bmp,.webp,.txt,.html,.rtf" hidden>
+            </div>
+            <div class="batch-progress" id="batchProgress" style="display:none">
+                <div class="batch-counts" id="batchCounts"></div>
+                <div class="batch-bar-track"><div class="batch-bar-fill" id="batchBarFill"></div></div>
+                <div class="batch-bar-text" id="batchBarText"></div>
             </div>
             <div class="file-list" id="fileList">
-                <div class="empty-docs">Upload PDFs to get started</div>
+                <div class="empty-docs">Upload documents to get started</div>
             </div>
             <div class="stats" id="stats">Loading graph stats...</div>
         </div>
@@ -59,7 +64,7 @@
                     <div class="message assistant">
                         <div class="bubble">
                             Hi! I'm your document assistant.<br><br>
-                            Upload PDFs using the sidebar on the left — once they show <strong style="color:#2e7d32">✓ Ready</strong>, you can ask me anything about them.
+                            Upload PDFs, Word docs, Excel sheets, images, or text files using the sidebar — once they show <strong style="color:#2e7d32">✓ Ready</strong>, you can ask me anything about them.
                         </div>
                     </div>
                 </div>

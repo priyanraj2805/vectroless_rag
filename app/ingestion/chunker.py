@@ -1,6 +1,8 @@
 import re
 from typing import List, Dict
 
+MAX_CHUNK_CHARS = 1500
+
 
 class TextChunker:
     HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
@@ -20,6 +22,75 @@ class TextChunker:
                     "section_title": section.get("title", ""),
                     "page_number": None,
                 })
+        return chunks
+
+    def chunk_from_structured(self, elements: List[Dict], document_id: int) -> List[Dict]:
+        """
+        Converts Docling structured elements into database-ready chunks.
+
+        Strategy:
+        - Paragraphs accumulate until MAX_CHUNK_CHARS, then flush as one chunk.
+        - Each table is always its own chunk — never merged into text.
+        - Each figure caption is always its own chunk.
+        - Every chunk carries the section_title from the nearest heading above it.
+        - Page number comes from the first element that contributed to the chunk.
+        """
+        chunks: List[Dict] = []
+        current_section = ""
+        buffer_text = ""
+        buffer_page = 1
+
+        def flush_buffer():
+            nonlocal buffer_text, buffer_page
+            if buffer_text.strip():
+                chunks.append({
+                    "document_id": document_id,
+                    "content": buffer_text.strip(),
+                    "section_title": current_section,
+                    "page_number": buffer_page,
+                    "chunk_type": "text",
+                })
+            buffer_text = ""
+
+        for el in elements:
+            el_type = el.get("type")
+            text = el.get("text", "").strip()
+            page = el.get("page", 1)
+
+            if el_type == "heading":
+                flush_buffer()
+                current_section = text
+                buffer_page = page
+
+            elif el_type == "paragraph":
+                if not buffer_text:
+                    buffer_page = page
+                if len(buffer_text) + len(text) > MAX_CHUNK_CHARS:
+                    flush_buffer()
+                    buffer_page = page
+                buffer_text += ("\n\n" + text if buffer_text else text)
+
+            elif el_type == "table":
+                flush_buffer()
+                chunks.append({
+                    "document_id": document_id,
+                    "content": text,
+                    "section_title": current_section,
+                    "page_number": page,
+                    "chunk_type": "table",
+                })
+
+            elif el_type == "figure":
+                flush_buffer()
+                chunks.append({
+                    "document_id": document_id,
+                    "content": text,
+                    "section_title": current_section,
+                    "page_number": page,
+                    "chunk_type": "figure",
+                })
+
+        flush_buffer()
         return chunks
 
     def chunk_from_pages(self, pages: List[Dict], document_id: int) -> List[Dict]:
